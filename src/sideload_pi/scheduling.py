@@ -10,6 +10,8 @@ slot. This module enforces those limits before any Apple call.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -26,6 +28,35 @@ def utcnow() -> datetime:
 
 def clock_is_sane(now: datetime) -> bool:
     return ensure_aware(now) >= SANE_EPOCH
+
+
+def ntp_synchronized() -> bool | None:
+    """True or False from timedatectl, or None when the tool cannot be asked.
+
+    A missing timedatectl must not block a machine that has no systemd.
+    An explicit ``no`` still means the clock must not decide a refresh,
+    even when the year is already past 2026.
+    """
+    if shutil.which("timedatectl") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip().lower()
+    if value == "yes":
+        return True
+    if value == "no":
+        return False
+    return None
 
 
 def ensure_aware(value: datetime) -> datetime:
@@ -102,9 +133,9 @@ def assert_can_register_app_id(
 ) -> None:
     if already_registered:
         return
+    # A recreate (the App ID is gone, so already_registered is false) spends a
+    # slot even when this same bundle id is already in the journal.
     recent = uses_in_window(uses, now, window)
-    if any(item.bundle_id == bundle_id for item in recent):
-        return
     if len(recent) >= limit:
         raise LimitError(
             f"Free Apple ID limit: {limit} App IDs per {int(window.total_seconds() // 86400)} "

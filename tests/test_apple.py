@@ -40,6 +40,22 @@ def _anisette_payload():
     ).encode()
 
 
+def test_anisette_resync_404_stops_with_a_clear_error():
+    def handler(method, url, body, headers):
+        assert method in {"POST", "GET"}
+        return HttpResponse(404, b"missing", {})
+
+    client = AnisetteClient("http://anisette.local", http=_Http(handler))
+    with pytest.raises(AnisetteError) as exc:
+        client.resync("sim-data")
+    message = str(exc.value)
+    assert "anisette resync" in message
+    assert "anisette-v3-server cannot perform it" in message
+    assert "provisioning data" in message
+    assert "wait and retry" in message
+    assert "Restart that server" not in message
+
+
 def test_anisette_aliases_and_a_missing_server():
     data = parse_anisette({"oneTimePassword": "otp", "machineID": "mid", "deviceUniqueIdentifier": "dev"})
     assert data.md == "otp"
@@ -312,9 +328,27 @@ def test_rejected_csr_revokes_ours_and_retries_once(tmp_path):
     dev.certs_after_reject = [ListedCertificate("CID", "aa", "sideload-pi", "device-id")]
     provisioner, library = _provisioner(tmp_path, dev)
     library.apps["com.example.notes"] = AppRecord("com.example.notes", "Notes", "1", "notes.ipa")
+    provisioner.layout.cert_meta.write_text(
+        json.dumps({"serial": "aa", "cert_id": "CID"}),
+        encoding="utf-8",
+    )
     provisioner.provision("com.example.notes", "Notes", "NEW", "Phone", lambda kind: "", NOW)
     assert dev.revoked == ["CID"]
     assert dev.csr_calls == 2
+
+
+def test_machine_name_alone_does_not_revoke(tmp_path):
+    from sideload_pi.apple_api import DeviceRecord, ListedCertificate
+    from sideload_pi.library import AppRecord
+
+    dev = _Dev([DeviceRecord("OLD", "Old")], csr_error=AppleAPIError("full", 35))
+    dev.certs_after_reject = [ListedCertificate("CID", "aa", "sideload-pi", "device-id")]
+    provisioner, library = _provisioner(tmp_path, dev)
+    library.apps["com.example.notes"] = AppRecord("com.example.notes", "Notes", "1", "notes.ipa")
+    with pytest.raises(SideloadError, match="only revokes"):
+        provisioner.provision("com.example.notes", "Notes", "NEW", "Phone", lambda kind: "", NOW)
+    assert dev.revoked == []
+    assert dev.csr_calls == 1
 
 
 def test_app_id_window_is_enforced_before_add(tmp_path):

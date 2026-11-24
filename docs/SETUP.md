@@ -82,7 +82,7 @@ cd pi-sideloader
 sudo scripts/install.sh
 ```
 
-The script is safe to run again. It enables I2C and SPI in `/boot/firmware/config.txt` (or `/boot/config.txt` on older images), builds `libplist`, `libimobiledevice-glue`, `libusbmuxd`, `libimobiledevice`, `usbmuxd`, and `ideviceinstaller` from the commits pinned in `scripts/install.sh`, and builds [zsign](https://github.com/zhlynn/zsign) at the commit of pull request 391 (`make -C build/linux -j1`). Bookworm's apt copies are not used: `libimobiledevice` 1.3.0 is too old for iOS 17, and `ideviceinstaller` 1.1.1 has no `list --xml`. It also installs `avahi-daemon` so a later Wi-Fi lookup can resolve the phone. A temporary swap file is added only while those compiles run, and only if the Pi has no swap yet.
+The script is safe to run again. It enables I2C and SPI in `/boot/firmware/config.txt` (or `/boot/config.txt` on older images), builds `libplist`, `libtatsu`, `libimobiledevice-glue`, `libusbmuxd`, `libimobiledevice`, `usbmuxd`, and `ideviceinstaller` from the commits pinned in `scripts/install.sh`, and builds [zsign](https://github.com/zhlynn/zsign) at the commit of pull request 391 (`make -C build/linux -j1`). `libimobiledevice` at that pin needs `libtatsu` >= 1.0.3, which apt does not ship, so the script builds it after `libplist`. Bookworm's phone packages are not used: `libimobiledevice` 1.3.0 is too old for iOS 17, and `ideviceinstaller` 1.1.1 has no `list --xml`. Apt does supply `libcurl` and `libzip` (`libcurl4-openssl-dev`, `libzip-dev`), which `libtatsu` and `ideviceinstaller` require. It also installs `avahi-daemon` so a later Wi-Fi lookup can resolve the phone, and enables `systemd-time-wait-sync.service` so the daemon does not start on an unsynced clock. A temporary swap file is added only while those compiles run, and only if the Pi has no swap yet.
 
 It does **not** start `sideload-pi.service`. The panel test, `anisette_url`, and `sideload-pi login` come first. `sudo sideload-pi enable` is the step that starts the daemon.
 
@@ -135,7 +135,7 @@ You should see a card titled **TEST V1**, four solid bars, and a line that says 
 1. Power-cycle the Pi. A wrong waveform can leave the controller busy. Do not chain the four tests without a power cycle.
 2. `sudo sideload-pi display-test V2`, then V3, then V4, same rule.
 
-When one card is sharp and the words match the driver you asked for, edit `/etc/sideload-pi/config.json`:
+When one card is sharp and the words match the driver you asked for, that `display-test` writes the driver name to `/var/lib/sideload-pi/display-version`. `display.version` can stay `auto`: `sudo sideload-pi enable` accepts the recorded file. You can also set the version explicitly in `/etc/sideload-pi/config.json`:
 
 ```json
 "display": { "version": "V1", "allow_partial": true }
@@ -145,11 +145,7 @@ Use the version that worked. `allow_partial` does not give V1 a partial refresh.
 
 V2, V3, and V4 partial-refresh the progress bar, and take a full refresh when the screen changes, after every `full_refresh_every` partials (default 8; Waveshare's note is about five), or every `full_refresh_minutes` (default 30). Set `allow_partial` to false if you want the slower full-only behavior on those panels too.
 
-Restart after editing:
-
-```sh
-sudo systemctl restart sideload-pi
-```
+The daemon is not running yet. Do not start it here. Next is the anisette URL, then login, then `sudo sideload-pi enable`.
 
 `sudo sideload-pi display-test V2 --preview /tmp/v2.png` writes the card to a PNG and does not touch the panel. Useful over SSH if you want to look at the artwork, not useful for identifying the glass.
 
@@ -161,7 +157,7 @@ Run [Dadoum's anisette-v3-server](https://github.com/Dadoum/anisette-v3-server) 
 
 The client reads `GET /v3/client_info` for the `user_agent` and `client_info` pair, and `GET /` for the one-time password. Since 12 October 2026 Apple rejects a login (`-80045`) when those two headers do not match the program that produced the anisette data. Do not point this at a server that only speaks the old header set.
 
-If Apple answers `hsc` 434, the client asks the server to resynchronize (`POST /v3/resync`, then `GET /reprovision`) and retries the login once with the same SRP public key. Dadoum's current `anisette-v3-server` has neither route. Restart that server so it re-provisions, then sign in again. Provision's older server accepts `GET /reprovision` when remote reprovisioning is turned on.
+If Apple answers `hsc` 434, the client asks the server to resynchronize and retries the login once with the same SRP public key, but only when that request succeeds. Dadoum's current `anisette-v3-server` has no resync route, and restarting it does not apply a resync. Login stops. Re-provision by wiping that server's provisioning data, or wait and try the login again. A server that answers `POST /v3/resync` or `GET /reprovision` with success still gets the one retry.
 
 Put the URL in the config. A Tailscale address is a good choice, so the Pi can reach it from a cafe without opening a port:
 
@@ -169,11 +165,7 @@ Put the URL in the config. A Tailscale address is a good choice, so the Pi can r
 "anisette_url": "http://100.x.y.z:6969"
 ```
 
-No trailing path is required. The client requests `url + "/"`.
-
-```sh
-sudo systemctl restart sideload-pi
-```
+No trailing path is required. The client requests `{url}/v3/client_info` first (User-Agent and client info), then `GET {url}/` for the one-time password.
 
 ## 8. Apple ID
 
@@ -191,9 +183,17 @@ sudo sideload-pi 2fa 123456
 
 You have 10 minutes (`two_fa_timeout_seconds`) before that attempt gives up. Trigger the refresh again afterwards.
 
-A free Personal Team, per Apple's account help, can have up to **10 App IDs** and **3 devices**, each expiring after 7 days, and **3 apps installed** on a device. Profiles expire 7 days after they are issued. Re-signing an app that already has an App ID does not spend a new slot. This tool refreshes on day 6 by default (`refresh_margin_days` is 1). It will not revoke a certificate for you. If Apple refuses the certificate request, revoke an unused development certificate in Xcode and try again.
+A free Personal Team, per Apple's account help, can have up to **10 App IDs** and **3 devices**, each expiring after 7 days, and **3 apps installed** on a device. Profiles expire 7 days after they are issued. Re-signing an app that already has an App ID does not spend a new slot. Creating that App ID again, including the same bundle after Apple dropped it, does. This tool refreshes on day 6 by default (`refresh_margin_days` is 1). The certificate is reused until it expires inside that margin. Replacing it revokes only the certificate this tool recorded (serial and id in `secrets/development.json`), using the v1 certificates API. If Apple then says the slot is full (result 35 or 7460), that same certificate is revoked and the CSR is submitted once more. Other certificates on the account are left alone. If the slot is still full, revoke a different certificate in Xcode and try again.
 
 App extensions and a watch app each need their own App ID, and they count toward both limits. By default they are stripped at sign time (`strip_extensions` and `strip_watch`). The status line says so when that happens. Turn the flags off only if you have the slots and you need the extension.
+
+The daemon starts only after the panel test, `anisette_url`, and this login:
+
+```sh
+sudo sideload-pi enable
+```
+
+That refuses to start while `anisette_url` is empty, no Apple ID is saved, or `display.version` is `auto` and `display-test` has not recorded a driver.
 
 ## 9. Trust and Developer Mode
 

@@ -157,12 +157,10 @@ class AnisetteClient:
     def resync(self, md_data: str) -> None:
         """Ask the anisette server to resynchronize after Apple's hsc 434.
 
-        anisette-v3-server's app.d has no route that accepts X-Apple-I-MD-DATA.
-        Provision's older anisette server accepts GET /reprovision when
-        allow-remote-reprovisioning is on. POST /v3/resync is tried first for a
-        server that grew that route; a 404 falls through to GET /reprovision.
-        If neither answers, the owner has to restart the v3 server so it
-        re-provisions locally. This does not invent a successful resync.
+        A 2xx from POST /v3/resync or GET /reprovision lets the GSA login retry
+        once with the same SRP public key. Dadoum's anisette-v3-server has
+        neither route, and restarting that process does not apply a resync.
+        This does not invent a successful resync and does not modify the server.
         """
         if not md_data:
             raise AnisetteError("Apple's resync request had no X-Apple-I-MD-DATA")
@@ -181,11 +179,12 @@ class AnisetteClient:
         if 200 <= reprovisioned.status < 300:
             return
         raise AnisetteError(
-            "Apple asked the anisette server to resynchronize (hsc 434), but it "
-            f"refused POST /v3/resync (HTTP {posted.status}) and GET /reprovision "
-            f"(HTTP {reprovisioned.status}). Dadoum's anisette-v3-server has no "
-            "remote resync route. Restart that server so it re-provisions, then "
-            "sign in again."
+            "Apple asked for an anisette resync (hsc 434), but the current "
+            "anisette-v3-server cannot perform it "
+            f"(POST /v3/resync returned HTTP {posted.status}, "
+            f"GET /reprovision returned HTTP {reprovisioned.status}). "
+            "That server has no resync route. Re-provision by wiping the "
+            "server's provisioning data, or wait and retry the login."
         )
 
     def _get_json(self, url: str) -> dict:

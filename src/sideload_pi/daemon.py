@@ -34,6 +34,7 @@ from sideload_pi.provisioner import Provisioner
 from sideload_pi.scheduling import (
     clock_is_sane,
     format_time,
+    ntp_synchronized,
     refresh_due,
     retry_delay_seconds,
     retry_ready,
@@ -123,6 +124,7 @@ class Daemon:
         probe: SystemProbe | None = None,
         shutdown=power_off,
         sleep=time.sleep,
+        clock_synced=None,
     ):
         self.config = config
         self.layout = layout
@@ -136,6 +138,7 @@ class Daemon:
         self.probe = probe or SystemProbe()
         self.shutdown = shutdown
         self.sleep = sleep
+        self.clock_synced = clock_synced if clock_synced is not None else ntp_synchronized
         self.book = RefreshBook()
         self.lock = threading.Lock()
         self.wake = threading.Event()
@@ -199,11 +202,16 @@ class Daemon:
         if self.halted:
             return
         self._reload_library()
-        if not clock_is_sane(now):
-            self._set(
-                "waiting_for_clock",
-                "Clock is not synced. Waiting for time-sync before any refresh.",
-            )
+        synced = self.clock_synced()
+        if not clock_is_sane(now) or synced is False:
+            if not clock_is_sane(now):
+                detail = "Clock is before 2026-01-01. Waiting for time-sync before any refresh."
+            else:
+                detail = (
+                    "NTP is not synchronized (timedatectl NTPSynchronized is not yes). "
+                    "Waiting before any refresh."
+                )
+            self._set("waiting_for_clock", detail)
             self._paint(now)
             return
         self.phone = self.devices.current() if self.devices else None

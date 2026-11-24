@@ -260,7 +260,11 @@ class Provisioner:
         return issued
 
     def _revoke_ours(self, team_id, machine_id, meta: dict, call) -> bool:
-        """Revoke only the certificate this tool created. Returns whether one was revoked."""
+        """Revoke only the certificate this tool created. Returns whether one was revoked.
+
+        ``machine_id`` is not a match key. A machineName of ours is not enough:
+        another certificate on the account can carry the same name.
+        """
         try:
             listed = call(lambda client, fresh: client.list_development_certs(team_id, fresh))
         except AppleAPIError as exc:
@@ -268,21 +272,14 @@ class Provisioner:
             return False
         serial = str(meta.get("serial") or "").casefold()
         cert_id = str(meta.get("cert_id") or "")
+        if not cert_id and not serial:
+            return False
         ours = [
             item
             for item in listed
             if (cert_id and item.cert_id == cert_id)
             or (serial and item.serial.casefold() == serial)
         ]
-        if not ours and not cert_id and not serial:
-            named = [
-                item
-                for item in listed
-                if item.machine_name == self.config.machine_name
-                and (not item.machine_id or item.machine_id == machine_id)
-            ]
-            if len(named) == 1:
-                ours = named
         if len(ours) != 1:
             return False
         call(lambda client, fresh: client.revoke_certificate(team_id, ours[0].cert_id, fresh))

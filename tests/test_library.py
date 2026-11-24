@@ -7,7 +7,7 @@ from tests.support import make_ipa
 from sideload_pi.credentials import AccountSecrets, file_mode, save_account
 from sideload_pi.errors import LimitError, SideloadError
 from sideload_pi.layout import Layout
-from sideload_pi.library import Library
+from sideload_pi.library import AppRecord, Library
 from sideload_pi.profile import parse_mobileprovision
 
 NOW = datetime(2026, 6, 1, tzinfo=UTC)
@@ -104,6 +104,29 @@ def test_kept_extension_counts_apps_already_in_the_library(tmp_path):
             window=timedelta(days=7),
             app_id_limit=10,
         )
+
+
+def test_mark_failure_keeps_account_kind_and_team(tmp_path):
+    layout = Layout(tmp_path)
+    layout.ensure()
+    library = Library(layout)
+    library.apps["com.example.notes"] = AppRecord(
+        "com.example.notes", "Notes", "1", "notes.ipa"
+    )
+    library.account_kind = "unknown"
+    library.team_id = ""
+    library.save()
+    library.account_kind = "free"
+    library.team_id = "TEAM"
+    library.mark_failure("com.example.notes", "boom", NOW, delay=timedelta(minutes=5))
+    assert library.account_kind == "free"
+    assert library.team_id == "TEAM"
+    again = Library(layout)
+    again.load()
+    assert again.account_kind == "free"
+    assert again.team_id == "TEAM"
+    assert again.apps["com.example.notes"].last_error == "boom"
+    assert again.apps["com.example.notes"].attempts == 1
 
 
 def test_corrupt_state_is_moved_aside_instead_of_crashing(tmp_path):

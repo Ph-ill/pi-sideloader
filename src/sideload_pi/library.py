@@ -292,7 +292,14 @@ class Library:
         self.commit(apply)
 
     def mark_failure(self, bundle_id: str, message: str, now: datetime, *, delay: timedelta) -> None:
+        team = self.team_id
+        kind = self.account_kind
+
         def apply() -> None:
+            if team:
+                self.team_id = team
+            if kind != "unknown":
+                self.account_kind = kind
             record = self.apps.get(bundle_id)
             if record is None:
                 return

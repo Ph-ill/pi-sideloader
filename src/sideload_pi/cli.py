@@ -280,8 +280,15 @@ def _display_test(config, driver: str | None) -> int:
         note = "full refresh only, so the progress bar updates slowly on purpose"
     else:
         note = "partial refresh is available"
+    layout = Layout(config.root)
+    layout.ensure()
+    layout.display_version.write_text(version + "\n")
     print(f"Showed the {version} test pattern ({note}).")
-    print("If the label is crisp, set display.version to this and restart the daemon.")
+    print(f"Recorded {version} in {layout.display_version}.")
+    print(
+        "If the label is crisp, leave display.version on auto or set it to this. "
+        "Then set anisette_url, log in, and run sudo sideload-pi enable."
+    )
     print("If it is snow, blank, or stuck, power-cycle and try the next driver.")
     return 0
 

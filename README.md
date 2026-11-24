@@ -34,7 +34,7 @@ Driver test cards, one per revision: [V1](docs/previews/test-v1.png), [V2](docs/
 
 ```sh
 sudo sideload-pi login              # once, including the Apple verification code
-sudo sideload-pi enable             # after anisette_url and the display test
+sudo sideload-pi enable             # after display-test, anisette_url, and login
 sudo sideload-pi add ~/Notes.ipa
 sudo sideload-pi status
 sudo sideload-pi refresh            # or plug the phone in and let the daemon notice

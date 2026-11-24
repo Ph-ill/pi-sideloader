@@ -253,6 +253,23 @@ def test_sms_uses_the_listed_phone_id():
     assert b'"id": 1' not in sent
 
 
+def test_sms_without_a_phone_list_does_not_guess_id_1():
+    class Http:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, url, body=None, headers=None, timeout=None, follow_redirects=True):
+            self.calls.append(method)
+            return HttpResponse(404, b"", {})
+
+    http = Http()
+    with pytest_raises() as exc:
+        GsaClient(http)._sms_code({}, lambda kind, phones: "123456")
+    assert "trustedPhoneNumbers" in str(exc.value)
+    assert "id 1" in str(exc.value)
+    assert "PUT" not in http.calls
+
+
 def pytest_raises():
     import pytest
 

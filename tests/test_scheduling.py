@@ -8,6 +8,7 @@ from sideload_pi.scheduling import (
     assert_can_add_app,
     assert_can_register_app_id,
     assert_extension_budget,
+    ntp_synchronized,
     refresh_due,
     retry_delay_seconds,
     whole_days_remaining,
@@ -59,6 +60,39 @@ def test_reusing_a_bundle_does_not_spend_an_app_id():
             limit=10,
             already_registered=False,
         )
+
+
+def test_recreating_a_bundle_already_in_the_window_still_counts():
+    uses = [AppIdUse(f"com.example.{i}", NOW - timedelta(days=1)) for i in range(9)]
+    uses.append(AppIdUse("com.example.notes", NOW - timedelta(days=1)))
+    with pytest.raises(LimitError):
+        assert_can_register_app_id(
+            uses,
+            "com.example.notes",
+            NOW,
+            window=timedelta(days=7),
+            limit=10,
+            already_registered=False,
+        )
+
+
+def test_missing_timedatectl_does_not_claim_the_clock_is_unsynced(monkeypatch):
+    monkeypatch.setattr("sideload_pi.scheduling.shutil.which", lambda _name: None)
+    assert ntp_synchronized() is None
+
+
+def test_timedatectl_no_is_not_synced(monkeypatch):
+    monkeypatch.setattr("sideload_pi.scheduling.shutil.which", lambda _name: "/usr/bin/timedatectl")
+
+    class _Result:
+        returncode = 0
+        stdout = "no\n"
+
+    monkeypatch.setattr(
+        "sideload_pi.scheduling.subprocess.run",
+        lambda *_args, **_kwargs: _Result(),
+    )
+    assert ntp_synchronized() is False
 
 
 def test_fourth_app_is_refused_and_extensions_count_when_kept():

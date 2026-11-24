@@ -23,7 +23,11 @@ export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_
 ZSIGN_COMMIT=1075760146063026e4a04524de3142e6f376b179
 # Tips of the libimobiledevice projects on 2026-11-24. Not a claim they were
 # run against an iPhone from this repo.
+# libtatsu b8d518a7 is the master tip (verified: exists, NEWS Version 1.1.1).
+# Tag 1.1.1 is the older commit 726b6fa32fc86d56c9022b260df2de525a444aea.
+# libimobiledevice 60bf03b4 has no fallback for libtatsu-1.0 >= 1.0.3.
 LIBPLIST_COMMIT=b3f14c22dbb29056c0d3c37bb9b2401ffdb7bc8f
+LIBTATSU_COMMIT=b8d518a7d188c8c98dd9e6debb855bb2809699ee
 LIBIMOBILEDEVICE_GLUE_COMMIT=420053a5fc536062014a121e14d847db914be999
 LIBUSBMUXD_COMMIT=1498dee3aadf66dbae10e699d71c62b428a511a3
 LIBIMOBILEDEVICE_COMMIT=60bf03b4cac8ed5f52f803cdb031a404c0da3beb
@@ -52,6 +56,8 @@ apt-get install -y \
   libssl-dev \
   libusb-1.0-0-dev \
   libavahi-client-dev \
+  libcurl4-openssl-dev \
+  libzip-dev \
   zlib1g-dev \
   openssl \
   ca-certificates
@@ -120,6 +126,30 @@ build_zsign() {
   echo "zsign $ZSIGN_COMMIT installed."
 }
 
+# Depth-1 fetch of a raw SHA has no tags. git-version-gen then prints
+# "<NEWS version>-git-<sha>", and pkg-config rejects that suffix for every
+# >= check (confirmed: 2.8.1-git-... fails `libplist-2.0 >= 2.6.0`).
+# configure.ac calls ./git-version-gen $RELEASE_VERSION at autoconf time,
+# so a numeric NEWS version is what the .pc file must advertise.
+pin_pkgconfig_version() {
+  local version
+  version="$(sed -n 's/^Version \([[:digit:]][[:digit:].]*\).*/\1/p' NEWS | head -n 1)"
+  if [[ -z "$version" ]]; then
+    echo "NEWS has no numeric Version line in $PWD; pkg-config would reject the git version." >&2
+    exit 1
+  fi
+  export RELEASE_VERSION="$version"
+  echo "pkg-config version for $(basename "$PWD") is $RELEASE_VERSION (shallow clone has no tags)."
+}
+
+require_pkg() {
+  if ! pkg-config --exists "$1"; then
+    local name="${1%% *}"
+    echo "pkg-config does not accept '$1' (reported: $(pkg-config --modversion "$name" 2>/dev/null || echo missing))." >&2
+    exit 1
+  fi
+}
+
 build_autotools() {
   local name="$1" url="$2" commit="$3"
   shift 3
@@ -133,6 +163,7 @@ build_autotools() {
   fetch_commit "$src" "$url" "$commit"
   (
     cd "$src"
+    pin_pkgconfig_version
     ./autogen.sh
     ./configure --prefix=/usr/local "$@"
     make -j1
@@ -179,6 +210,7 @@ verify_phone_tools() {
   echo "ideviceinstaller supports list/install/upgrade --xml."
   echo "Pinned commits:"
   echo "  libplist $LIBPLIST_COMMIT"
+  echo "  libtatsu $LIBTATSU_COMMIT"
   echo "  libimobiledevice-glue $LIBIMOBILEDEVICE_GLUE_COMMIT"
   echo "  libusbmuxd $LIBUSBMUXD_COMMIT"
   echo "  libimobiledevice $LIBIMOBILEDEVICE_COMMIT"
@@ -220,11 +252,35 @@ EOF
 
 enable_boot
 ensure_swap
+# Hard PKG_CHECK_MODULES from the pinned configure.ac files (no fallback):
+#   libtatsu:            libplist-2.0 >= 2.6.0, libcurl >= 7.0
+#   libimobiledevice-glue: libplist-2.0 >= 2.3.0
+#   libusbmuxd:          libplist-2.0 >= 2.2.0, libimobiledevice-glue-1.0 >= 1.2.0
+#   libimobiledevice:    libusbmuxd-2.0 >= 2.0.2, libplist-2.0 >= 2.3.0,
+#                        libimobiledevice-glue-1.0 >= 1.3.0, libtatsu-1.0 >= 1.0.3,
+#                        openssl >= 0.9.8 (default; GnuTLS is the other choice)
+#   usbmuxd:             libusb-1.0 >= 1.0.9, libplist-2.0 >= 2.6.0,
+#                        libimobiledevice-glue-1.0 >= 1.0.0
+#                        (libimobiledevice-1.0 >= 1.3.0 is optional there)
+#   ideviceinstaller:    libimobiledevice-1.0 >= 1.3.0, libplist-2.0 >= 2.3.0,
+#                        libzip >= 0.10
+# pthread is libc. readline is optional. udev is auto. systemd is disabled
+# for usbmuxd because this script ships its own unit.
+require_pkg "libcurl >= 7.0"
+require_pkg "libzip >= 0.10"
+require_pkg "openssl >= 0.9.8"
+require_pkg "libusb-1.0 >= 1.0.9"
 build_zsign
 build_autotools libplist https://github.com/libimobiledevice/libplist.git "$LIBPLIST_COMMIT"
+require_pkg "libplist-2.0 >= 2.6.0"
+build_autotools libtatsu https://github.com/libimobiledevice/libtatsu.git "$LIBTATSU_COMMIT"
+require_pkg "libtatsu-1.0 >= 1.0.3"
 build_autotools libimobiledevice-glue https://github.com/libimobiledevice/libimobiledevice-glue.git "$LIBIMOBILEDEVICE_GLUE_COMMIT"
+require_pkg "libimobiledevice-glue-1.0 >= 1.3.0"
 build_autotools libusbmuxd https://github.com/libimobiledevice/libusbmuxd.git "$LIBUSBMUXD_COMMIT"
+require_pkg "libusbmuxd-2.0 >= 2.0.2"
 build_autotools libimobiledevice https://github.com/libimobiledevice/libimobiledevice.git "$LIBIMOBILEDEVICE_COMMIT"
+require_pkg "libimobiledevice-1.0 >= 1.3.0"
 build_autotools usbmuxd https://github.com/libimobiledevice/usbmuxd.git "$USBMUXD_COMMIT" --without-systemd
 build_autotools ideviceinstaller https://github.com/libimobiledevice/ideviceinstaller.git "$IDEVICEINSTALLER_COMMIT"
 install_usbmuxd_unit
@@ -273,6 +329,9 @@ systemctl daemon-reload
 udevadm control --reload-rules || true
 systemctl enable --now avahi-daemon.service || true
 systemctl enable --now usbmuxd.service || true
+# Makes time-sync.target wait until the clock is actually stepped.
+# Not --now: that oneshot blocks until NTP, and install should not hang on it.
+systemctl enable systemd-time-wait-sync.service
 release_swap
 
 echo

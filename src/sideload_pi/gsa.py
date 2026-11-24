@@ -389,7 +389,11 @@ class GsaClient:
     def _sms_code(self, headers, code_provider) -> None:
         phones = self._phone_numbers(headers)
         if not phones:
-            phones = [SmsNumber("1", "the number on the Apple ID")]
+            raise AppleAuthError(
+                "Apple asked for an SMS code, but trustedPhoneNumbers could not "
+                "be read. This login will not guess phone id 1. Use a trusted "
+                "device, or sign in again when Apple returns the phone list."
+            )
         entered = str(_request_code(code_provider, "sms", phones)).strip()
         phone_id, code = _split_sms(entered, phones)
         body = json_bytes({"phoneNumber": {"id": int(phone_id)}, "mode": "sms"})

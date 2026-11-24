@@ -84,6 +84,7 @@ def _daemon(tmp_path, **kwargs):
         expiry=kwargs.pop("expiry", NOW + timedelta(days=6)),
     )
     panel = kwargs.pop("panel", _Panel())
+    clock_synced = kwargs.pop("clock_synced", lambda: True)
     return Daemon(
         config,
         layout,
@@ -94,6 +95,7 @@ def _daemon(tmp_path, **kwargs):
         installer=_Installer(kwargs.get("percents", [10, 12, 40, 100])),
         panel=panel,
         probe=_Probe(),
+        clock_synced=clock_synced,
     )
 
 
@@ -178,6 +180,22 @@ def test_unsynced_clock_does_not_decide_a_refresh(tmp_path):
     daemon = _daemon(tmp_path, phone=phone, provisioner=provisioner, expiry=None)
     daemon.tick(datetime(2020, 1, 1, tzinfo=UTC))
     assert daemon.phase == "waiting_for_clock"
+    assert provisioner.calls == []
+
+
+def test_post_2026_clock_without_ntp_does_not_refresh(tmp_path):
+    phone = Phone("UDID", "Pocket", "usb")
+    provisioner = _Provisioner(NOW + timedelta(days=7))
+    daemon = _daemon(
+        tmp_path,
+        phone=phone,
+        provisioner=provisioner,
+        expiry=None,
+        clock_synced=lambda: False,
+    )
+    daemon.tick(NOW)
+    assert daemon.phase == "waiting_for_clock"
+    assert "NTP" in daemon.message
     assert provisioner.calls == []
 
 
