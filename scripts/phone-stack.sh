@@ -12,6 +12,9 @@
 : "${MAKE_JOBS:=1}"
 : "${FORCE_ZSIGN:=0}"
 : "${FORCE_LIBS:=0}"
+: "${PREBUILT_DEST:=/}"
+
+_PHONE_STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # zhlynn/zsign#391, SHA-256-only by default and canonical DER entitlements.
 ZSIGN_COMMIT=1075760146063026e4a04524de3142e6f376b179
@@ -100,6 +103,143 @@ write_pin_stamps() {
   echo "$LIBIMOBILEDEVICE_COMMIT" > "$STAMP_DIR/libimobiledevice.stamp"
   echo "$USBMUXD_COMMIT" > "$STAMP_DIR/usbmuxd.stamp"
   echo "$IDEVICEINSTALLER_COMMIT" > "$STAMP_DIR/ideviceinstaller.stamp"
+}
+
+prebuilt_sha256_matches() {
+  local file="$1" expected="$2" got
+  if [[ ! "$expected" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "PREBUILT_SHA256 is not 64 hex digits. Building from source." >&2
+    return 1
+  fi
+  got="$(sha256sum "$file" | awk '{print $1}')" || return 1
+  if [[ "${got,,}" != "${expected,,}" ]]; then
+    echo "Prebuilt checksum does not match prebuilt/armv6.env." >&2
+    return 1
+  fi
+}
+
+# Drop files this attempt copied, and the pin stamps. Called only after a
+# copy, including a verify or ldconfig failure. A rejected archive never
+# gets here, so a previous good install keeps its stamps.
+_prebuilt_cleanup_failed_install() {
+  local tmp="$1" dest="$2" path rel target
+  if [[ -d "$tmp" ]]; then
+    while IFS= read -r -d '' path; do
+      rel="${path#"$tmp"/}"
+      target="${dest}/${rel}"
+      if [[ -L "$target" || -f "$target" ]]; then
+        rm -f "$target"
+      fi
+    done < <(find "$tmp" \( -type f -o -type l \) -print0)
+  fi
+  if [[ -d "$STAMP_DIR" ]]; then
+    rm -f "$STAMP_DIR"/*.stamp
+  fi
+  rm -rf "$tmp"
+}
+
+apply_prebuilt_archive() {
+  # set -e is off when install.sh calls this under `if`. Check every command.
+  local archive="$1"
+  local dest="${PREBUILT_DEST:-/}"
+  local checker="${_PHONE_STACK_DIR}/check-prebuilt-tar.py"
+  local tmp rel
+  if [[ ! -f "$checker" ]]; then
+    echo "Prebuilt checker is missing ($checker)." >&2
+    return 1
+  fi
+  tmp="$(mktemp -d)" || return 1
+  if ! python3 "$checker" --extract "$tmp" "$archive"; then
+    echo "Prebuilt tarball failed validation. Building from source." >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! manifest_matches_pins "$tmp/usr/local/share/sideload-pi/manifest.txt"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  for rel in usr/local/bin usr/local/sbin usr/local/lib usr/local/share/sideload-pi; do
+    if [[ ! -d "$tmp/$rel" ]]; then
+      continue
+    fi
+    if ! mkdir -p "$dest/$rel"; then
+      _prebuilt_cleanup_failed_install "$tmp" "$dest"
+      return 1
+    fi
+    if ! cp -a "$tmp/$rel/." "$dest/$rel/"; then
+      echo "Could not copy $rel from the prebuilt tarball." >&2
+      _prebuilt_cleanup_failed_install "$tmp" "$dest"
+      return 1
+    fi
+  done
+  if [[ "$(id -u)" -eq 0 ]]; then
+    local path target
+    while IFS= read -r -d '' path; do
+      rel="${path#"$tmp"/}"
+      target="${dest}/${rel}"
+      if [[ -e "$target" || -L "$target" ]]; then
+        if ! chown -h root:root "$target"; then
+          echo "chown failed for $target" >&2
+          _prebuilt_cleanup_failed_install "$tmp" "$dest"
+          return 1
+        fi
+      fi
+    done < <(find "$tmp" -mindepth 1 -print0)
+  fi
+  if [[ "$dest" == "/" ]]; then
+    if ! echo /usr/local/lib > /etc/ld.so.conf.d/sideload-pi.conf; then
+      _prebuilt_cleanup_failed_install "$tmp" "$dest"
+      return 1
+    fi
+    if ! ldconfig; then
+      echo "ldconfig failed after installing the prebuilt tarball." >&2
+      _prebuilt_cleanup_failed_install "$tmp" "$dest"
+      return 1
+    fi
+  fi
+  if ! verify_phone_tools; then
+    echo "Prebuilt phone tools failed verification. Removing them and any stamp files." >&2
+    _prebuilt_cleanup_failed_install "$tmp" "$dest"
+    return 1
+  fi
+  write_pin_stamps
+  rm -rf "$tmp"
+  return 0
+}
+
+try_prebuilt() {
+  # set -e is off while this runs under `if`, so every failure returns 1.
+  if [[ "$(uname -m)" != "armv6l" ]]; then
+    echo "This machine is $(uname -m), not armv6l. The prebuilt tarball is not for it."
+    return 1
+  fi
+  if stamps_already_match; then
+    echo "Pinned phone tools are already installed."
+    return 0
+  fi
+  if [[ -z "${PREBUILT_TAG}" || -z "${PREBUILT_SHA256}" ]]; then
+    echo "prebuilt/armv6.env has no release yet. Building from source."
+    return 1
+  fi
+  local url="https://github.com/Ph-ill/pi-sideloader/releases/download/${PREBUILT_TAG}/sideload-pi-prebuilt-armv6.tar.gz"
+  local tmp
+  tmp="$(mktemp -d)" || return 1
+  if ! curl -fsSL --retry 3 --retry-delay 2 -o "$tmp/prebuilt.tar.gz" "$url"; then
+    echo "Could not download $url (no release yet, or this Pi is offline)."
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! prebuilt_sha256_matches "$tmp/prebuilt.tar.gz" "$PREBUILT_SHA256"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! apply_prebuilt_archive "$tmp/prebuilt.tar.gz"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  rm -rf "$tmp"
+  echo "Installed prebuilt phone tools from ${PREBUILT_TAG}."
+  return 0
 }
 
 apply_armv6_flags() {
@@ -249,15 +389,15 @@ verify_phone_tools() {
   help="$("${PREFIX}/bin/ideviceinstaller" --help 2>&1 || true)"
   if ! grep -q -- '--xml' <<<"$help"; then
     echo "The built ideviceinstaller does not advertise --xml. Refusing to finish." >&2
-    exit 1
+    return 1
   fi
   if [[ ! -x "${PREFIX}/bin/idevice_id" || ! -x "${PREFIX}/sbin/usbmuxd" ]]; then
     echo "idevice_id or usbmuxd is missing from ${PREFIX}." >&2
-    exit 1
+    return 1
   fi
   if [[ ! -x "${PREFIX}/bin/zsign" ]]; then
     echo "zsign is missing from ${PREFIX}/bin." >&2
-    exit 1
+    return 1
   fi
   echo "ideviceinstaller supports list/install/upgrade --xml."
   echo "Pinned commits:"

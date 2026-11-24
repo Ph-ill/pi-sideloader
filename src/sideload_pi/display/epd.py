@@ -7,10 +7,12 @@ third_party/WAVESHARE.txt. All four black/white panels are 250x122 landscape
 on the back of the screen, not the HAT's Rev2.x silkscreen, says which driver
 to use. Confirm with `sideload-pi display-test V1` (and V2, V3, V4).
 
-"auto" tries V4, then V3, then V2, and only then V1. V4/V3/V2 init waits on
-BUSY, so a stuck line fails that candidate. V1's init (epd2in13.py) never
-reads BUSY, so a V1 probe cannot fail closed. Do not trust auto on a panel
-that might be V1.
+The daemon and enable do not probe. With no confirmed display-version file,
+auto does not try V4, V3, V2, or V1: the panel stays closed and enable
+refuses to start. A confirmed display-test writes that file, and the file
+wins over the config. open_panel("auto") still walks saved, then V4, V3, V2,
+V1, for a caller that asks. V1's init (epd2in13.py) never reads BUSY, so that
+walk cannot fail closed. The daemon does not use it for an unconfirmed auto.
 
 Pins, BCM, matching the HAT: DC 25, RST 17, BUSY 24, CS 8, SPI0.
 Busy is high while the controller is refreshing and low when it is idle.

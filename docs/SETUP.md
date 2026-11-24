@@ -82,7 +82,7 @@ cd pi-sideloader
 sudo scripts/install.sh
 ```
 
-On an armv6l Pi, that command downloads a prebuilt tarball when `prebuilt/armv6.env` names a published `prebuilt-*` release and the committed sha256 matches. The tarball is zsign plus the pinned phone stack, built for ARMv6 (not Debian's armhf, which is ARMv7). Checksums, a missing release, an offline Pi, or any machine that is not `armv6l` all fall back to compiling. `sudo scripts/install.sh --build-from-source` skips the download. Until the first release exists, the env file is empty and every install compiles.
+On an armv6l Pi, that command downloads a prebuilt tarball when `prebuilt/armv6.env` names a published `prebuilt-*` release and the committed sha256 matches. The tarball is zsign plus the pinned phone stack, built for ARMv6 (not Debian's armhf, which is ARMv7). Before anything is copied, every member is checked: absolute paths, names containing `..`, symlinks whose target leaves `/usr/local`, setuid or setgid bits, device files, and paths outside `usr/local/{bin,sbin,lib,share/sideload-pi}` are rejected. The four trees are then copied, `ldconfig` runs, and the tools are executed. Stamp files are written only after that succeeds. A bad member, a bad checksum, a failed tool check, a missing release, an offline Pi, or any machine that is not `armv6l` falls back to compiling. A failed tool check removes what that attempt copied and leaves no stamp files. A tarball rejected before the copy does not touch an install that is already there. `sudo scripts/install.sh --build-from-source` skips the download and rebuilds even when the stamps already match. Until the first release exists, the env file is empty and every install compiles.
 
 The script is safe to run again. It enables I2C and SPI in `/boot/firmware/config.txt` (or `/boot/config.txt` on older images). A source build compiles `libplist`, `libtatsu`, `libimobiledevice-glue`, `libusbmuxd`, `libimobiledevice`, `usbmuxd`, and `ideviceinstaller` from the commits in `scripts/phone-stack.sh` (the same file the prebuilt workflow uses), and builds [zsign](https://github.com/zhlynn/zsign) at the commit of pull request 391 (`make -C build/linux -j1`). `libimobiledevice` at that pin needs `libtatsu` >= 1.0.3, which apt does not ship. Bookworm's phone packages are not used: `libimobiledevice` 1.3.0 is too old for iOS 17, and `ideviceinstaller` 1.1.1 has no `list --xml`. A source build needs the `-dev` packages (`libcurl4-openssl-dev`, `libzip-dev`, and the rest). A prebuilt install only installs the runtime libraries (`libssl3`, `libstdc++6`, `libusb-1.0-0`, `libavahi-client3`, `libcurl4`, `libzip4`, `zlib1g`). It also installs `avahi-daemon` so a later Wi-Fi lookup can resolve the phone. It does not enable `systemd-time-wait-sync.service`: that oneshot does not exit until NTP, and `sudo sideload-pi enable` runs `systemctl enable --now`, which would hang on it. The daemon starts anyway. Each tick paints `waiting_for_clock` and does not refresh until the clock is at least 2026-01-01 and `timedatectl show -p NTPSynchronized --value` is `yes`. If the `timedatectl` binary is missing, only the date check applies. A non-zero exit, a timeout, or any other output counts as not synced. A temporary swap file is added only while those compiles run, and only if the Pi has no swap yet.
 
@@ -96,26 +96,65 @@ It writes `/etc/sideload-pi/config.json` **only if that file does not exist**, c
 
 ### Publishing a prebuilt tarball
 
-The pins live in `scripts/phone-stack.sh`. The workflow `.github/workflows/prebuilt.yml` builds them inside a Raspbian Bookworm armhf rootfs from `archive.raspbian.org`, with `-march=armv6`, and refuses the artifact unless `readelf -A` says `Tag_CPU_arch: v6` and `qemu-arm -cpu arm1176` can run `zsign -v` and `ideviceinstaller --help` (the help must mention `--xml`). Every run uploads the tarball and its sha256 as a workflow artifact. A GitHub Release is created only when a tag named `prebuilt-*` is pushed. This repo does not push that tag for you.
+The pins live in `scripts/phone-stack.sh`. A push to `main` or `cursor/sideload-pi` runs `.github/workflows/prebuilt.yml` once. That job debootstraps Raspbian Bookworm from `https://archive.raspbian.org/raspbian` with the vendored key `ci/raspbian-archive-keyring.gpg` (fingerprint `A0DA 38D0 D76E 8B5D 6388 7281 9165 938D 90FD DD2E`), compiles with `-march=armv6`, and refuses the artifact unless `readelf -A` says `Tag_CPU_arch: v6` and `qemu-arm -cpu arm1176` can run `zsign -v` and `ideviceinstaller --help` (the help must mention `--xml`). The tarball contains no `*.stamp` files. The job uploads `sideload-pi-prebuilt-armv6.tar.gz` and the `.sha256` file as the artifact `sideload-pi-prebuilt-armv6`. GitHub keeps that artifact for 90 days.
 
-After the workflow on the commit you want is green, download the artifact `sideload-pi-prebuilt-armv6` and read the first field of `sideload-pi-prebuilt-armv6.tar.gz.sha256`. Put it in `prebuilt/armv6.env`:
+A later `prebuilt-*` tag does not compile again. The tag job downloads the artifact from the successful run for the tagged commit and uploads those exact bytes. `PREBUILT_SHA256` on `main` has to be the digest of that file before you publish. The publish job checks `sha256sum -c`, requires `origin/main`'s `PREBUILT_TAG` and `PREBUILT_SHA256` to match, and fails if the release already exists. It does not replace an existing asset. This repo does not push the tag for you.
+
+```sh
+# 1. Wait until the prebuilt workflow on the commit you want to publish is green.
+SHA=<40 hex characters of that commit>
+RUN=<the run id on that commit>
+
+gh run download "$RUN" --repo Ph-ill/pi-sideloader --name sideload-pi-prebuilt-armv6
+HASH=$(awk 'NR==1 {print $1}' sideload-pi-prebuilt-armv6.tar.gz.sha256)
+sha256sum -c sideload-pi-prebuilt-armv6.tar.gz.sha256
+```
+
+`HASH` is 64 hex characters and no filename. It is the digest of the file you just downloaded. Copy it from that run. Do not reuse a hash from memory or from a different build.
+
+```sh
+# 2. On main, record that tag name and that digest. This commit is not the one you tag.
+git checkout main
+git pull --ff-only origin main
+```
+
+Edit `prebuilt/armv6.env` so these two lines are exactly the tag you are about to push and the hash from step 1:
 
 ```
 PREBUILT_TAG=prebuilt-2026-11-24
-PREBUILT_SHA256=<64 hex characters, no filename>
+PREBUILT_SHA256=<HASH>
 ```
-
-Then, from a checkout of that commit:
 
 ```sh
 git add prebuilt/armv6.env
 git commit -m "Record the ARMv6 prebuilt checksum."
 git push origin main
-git tag prebuilt-2026-11-24
+
+# 3. Tag the built commit from step 1, not the checksum commit you just pushed.
+git tag prebuilt-2026-11-24 "$SHA"
 git push origin prebuilt-2026-11-24
 ```
 
-The tag push builds again and attaches `sideload-pi-prebuilt-armv6.tar.gz` and the `.sha256` file to the release. A second build is not guaranteed to hash the same. When that run is green, download the release asset's `.sha256`. If the hex differs from `PREBUILT_SHA256`, commit the new hex on `main` and push. Do not move the tag: install downloads `releases/download/prebuilt-2026-11-24/...` and checks it against the sha256 in the checkout it is running from.
+The tag push starts only the publish job. It finds the successful prebuilt run for `$SHA`, downloads that artifact, and creates the release from those files. Install clones `main`, downloads `releases/download/prebuilt-2026-11-24/sideload-pi-prebuilt-armv6.tar.gz`, and checks it against the sha256 in that checkout. Those bytes are the artifact from step 1, so the committed hash and the published asset are the same file.
+
+To publish without pushing the tag yourself, after step 2 is on `main`:
+
+```sh
+gh workflow run prebuilt.yml --repo Ph-ill/pi-sideloader \
+  --ref main \
+  -f publish_tag=prebuilt-2026-11-24 \
+  -f source_sha="$SHA"
+```
+
+`source_sha` is the full 40-character commit from step 1. The dispatch does not compile. If the tag is missing, the release is created with the tag pointing at `$SHA`. If the tag exists and points at a different commit, the job fails.
+
+Do this within 90 days, while the artifact still exists. To build that same commit again without publishing, leave the inputs empty:
+
+```sh
+gh workflow run prebuilt.yml --repo Ph-ill/pi-sideloader --ref "$SHA"
+```
+
+Wait for that run, then repeat from step 1 and copy the new digest. A rebuild is a different run. The publish job still uploads the run whose digest matches `main`, and it still does not compile as part of the tag.
 
 Reboot once so SPI and I2C come up:
 
@@ -146,7 +185,7 @@ Waveshare's own manual (the 2.13 inch e-Paper HAT page) is the source for this. 
 
 There is no version register to read. `display.version` may be `V1`, `V2`, `V3`, `V4`, or `auto`.
 
-`auto` tries V4, then V3, then V2, and only then V1. The newer inits wait for the BUSY pin, so a stuck panel fails that guess. The V1 init sequence **never reads BUSY**, so a V1 guess cannot fail. If your HAT might be V1, do not leave the setting on `auto`. Set it after the test below.
+`auto` does not try V4, then V3, then V2, then V1. There is no version register, and the daemon does not probe. While `/var/lib/sideload-pi/display-version` is missing, a config value of `auto` leaves the panel closed and `enable` refuses to start. `display-test` refuses `auto` as well. A yes on the test pattern writes that file, and the file wins over `config.json`, including the shipped default `V4`. With no file, `V4` is an explicit choice and `enable` accepts it. `auto` stays blocked until the confirmation file exists. If the HAT might be V1, do not set `auto`. Confirm one driver with the test below. The V1 init sequence never reads BUSY, so a wrong explicit driver can still return without an error.
 
 On the Pi, with the HAT stacked and SPI enabled. If the daemon is already running it holds the panel, and `display-test` refuses until you stop it:
 

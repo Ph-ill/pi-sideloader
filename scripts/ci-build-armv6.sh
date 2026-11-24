@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Build the pinned phone tools inside a Raspbian Bookworm armhf rootfs and
 # prove the binaries are ARMv6. Debian's armhf port is ARMv7; this script
-# debootstraps from archive.raspbian.org and compiles with -march=armv6.
+# debootstraps from https://archive.raspbian.org/raspbian with the vendored
+# key ci/raspbian-archive-keyring.gpg and compiles with -march=armv6.
+# A signature failure fails the job. Do not retry without the archive
+# signature, and do not mark the mirror trusted.
 #
 # Host invocation (GitHub Actions, ubuntu):
 #   bash scripts/ci-build-armv6.sh
@@ -28,12 +31,9 @@ inside_build() {
   export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1732406400}"
   # shellcheck source=phone-stack.sh
   source /work/scripts/phone-stack.sh
-  if ! apt-get update; then
-    echo "apt could not verify archive.raspbian.org; retrying with trusted=yes."
-    printf '%s\n' 'deb [trusted=yes] http://archive.raspbian.org/raspbian bookworm main' \
-      > /etc/apt/sources.list
-    apt-get update
-  fi
+  # sources.list was written by the host with signed-by pointing at the
+  # vendored key. A signature or TLS failure fails this job.
+  apt-get update
   apt-get install -y \
     build-essential \
     autoconf \
@@ -91,6 +91,9 @@ package_and_verify() {
   sudo rm -rf "$stage/usr/local/lib/pkgconfig"
   sudo find "$stage/usr/local/lib" -type f \( -name '*.a' -o -name '*.la' \) -delete
   sudo cp -a "$ROOTFS/usr/local/share/sideload-pi/." "$stage/usr/local/share/sideload-pi/"
+  # The live build writes pin stamps into the share directory. The Pi
+  # installer writes those only after the extracted tools actually run.
+  sudo find "$stage/usr/local" -type f -name '*.stamp' -delete
   # strip keeps Tag_CPU_arch. Skip anything that is not an ELF.
   sudo find "$stage/usr/local" -type f -print0 | while IFS= read -r -d '' file; do
     if readelf -h "$file" >/dev/null 2>&1; then
@@ -182,6 +185,13 @@ package_and_verify() {
     cd "$DIST"
     sha256sum "$TARBALL_NAME" > "$TARBALL_NAME.sha256"
   )
+  local members
+  members="$(tar -tzf "$tarball")"
+  if grep -q '\.stamp$' <<<"$members"; then
+    echo "$members" | grep '\.stamp$' >&2
+    echo "Refusing to publish a tarball that contains stamp files." >&2
+    exit 1
+  fi
   echo "Wrote $tarball"
   cat "$tarball.sha256"
   ls -lh "$tarball"
@@ -235,22 +245,28 @@ host_build() {
     exit 1
   fi
 
-  sudo mkdir -p /usr/share/keyrings
-  curl -fsSL http://archive.raspbian.org/raspbian.public.key \
-    | gpg --batch --yes --dearmor \
-    | sudo tee /usr/share/keyrings/raspbian-archive-keyring.gpg >/dev/null
+  local keyring="$REPO/ci/raspbian-archive-keyring.gpg"
+  local expected_fpr="A0DA38D0D76E8B5D638872819165938D90FDDD2E"
+  if [[ ! -f "$keyring" ]]; then
+    echo "Vendored Raspbian keyring is missing: $keyring" >&2
+    exit 1
+  fi
+  local fpr
+  fpr="$(gpg --batch --show-keys --with-colons "$keyring" | awk -F: '$1=="fpr" {print $10; exit}')"
+  if [[ "$fpr" != "$expected_fpr" ]]; then
+    echo "Raspbian archive key fingerprint is '${fpr:-missing}', expected ${expected_fpr}." >&2
+    exit 1
+  fi
+  echo "Raspbian archive key fingerprint ${fpr} matches."
 
   if [[ ! -x "$ROOTFS/bin/bash" ]]; then
     sudo rm -rf "$ROOTFS"
-    if ! sudo debootstrap --arch=armhf \
-      --keyring=/usr/share/keyrings/raspbian-archive-keyring.gpg \
+    # Signature failure is fatal. Do not retry past a rejected signature.
+    sudo debootstrap --arch=armhf \
+      --keyring="$keyring" \
       --variant=minbase \
-      bookworm "$ROOTFS" http://archive.raspbian.org/raspbian; then
-      echo "debootstrap rejected the Raspbian keyring; retrying the same archive without the GPG check."
-      sudo rm -rf "$ROOTFS"
-      sudo debootstrap --arch=armhf --no-check-gpg --variant=minbase \
-        bookworm "$ROOTFS" http://archive.raspbian.org/raspbian
-    fi
+      --include=ca-certificates \
+      bookworm "$ROOTFS" https://archive.raspbian.org/raspbian
   else
     echo "Reusing existing rootfs at $ROOTFS"
   fi
@@ -271,9 +287,23 @@ host_build() {
   fi
 
   sudo cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
+  # minbase can lack a CA bundle even with --include, and apt cannot check
+  # the archive signature until TLS connects. Copying the host bundle is
+  # TLS trust, not a signature bypass. The signed-by key is the vendored one.
+  if [[ ! -s "$ROOTFS/etc/ssl/certs/ca-certificates.crt" ]]; then
+    if [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
+      echo "No CA bundle is available, so https://archive.raspbian.org cannot be verified." >&2
+      exit 1
+    fi
+    sudo mkdir -p "$ROOTFS/etc/ssl/certs"
+    sudo cp /etc/ssl/certs/ca-certificates.crt "$ROOTFS/etc/ssl/certs/ca-certificates.crt"
+  fi
+  sudo mkdir -p "$ROOTFS/usr/share/keyrings"
+  sudo cp "$keyring" "$ROOTFS/usr/share/keyrings/raspbian-archive-keyring.gpg"
+  sudo chmod 644 "$ROOTFS/usr/share/keyrings/raspbian-archive-keyring.gpg"
   # main only. The rpi component lives on archive.raspberrypi.com and is
   # not part of this userland build. This is still Raspbian, not Debian armhf.
-  printf '%s\n' 'deb http://archive.raspbian.org/raspbian bookworm main' \
+  printf '%s\n' 'deb [signed-by=/usr/share/keyrings/raspbian-archive-keyring.gpg] https://archive.raspbian.org/raspbian bookworm main' \
     | sudo tee "$ROOTFS/etc/apt/sources.list" >/dev/null
   sudo mkdir -p "$ROOTFS/proc" "$ROOTFS/dev" "$ROOTFS/dev/pts" "$ROOTFS/work"
   sudo mountpoint -q "$ROOTFS/proc" || sudo mount --bind /proc "$ROOTFS/proc"

@@ -7,7 +7,7 @@
 #   has no `list --xml` (it only has `-o xml`). Both are built from the pinned
 #   commits in scripts/phone-stack.sh. zsign is pinned at or after zhlynn/zsign#391.
 # On an armv6l Pi, a recorded prebuilt tarball is installed instead of compiling.
-# Pass --build-from-source to skip that download.
+# Pass --build-from-source to skip that download and rebuild even if stamps match.
 # The daemon is not started here. Run display-test, set anisette_url, log in,
 # then `sudo sideload-pi enable`.
 set -euo pipefail
@@ -116,63 +116,6 @@ install_build_dependencies() {
     zlib1g-dev
 }
 
-try_prebuilt() {
-  # set -e is off while this runs under `if`, so every failure returns 1.
-  if [[ "$(uname -m)" != "armv6l" ]]; then
-    echo "This machine is $(uname -m), not armv6l. The prebuilt tarball is not for it."
-    return 1
-  fi
-  if stamps_already_match; then
-    echo "Pinned phone tools are already installed."
-    return 0
-  fi
-  if [[ -z "${PREBUILT_TAG}" || -z "${PREBUILT_SHA256}" ]]; then
-    echo "prebuilt/armv6.env has no release yet. Building from source."
-    return 1
-  fi
-  if [[ ! "$PREBUILT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
-    echo "PREBUILT_SHA256 is not 64 hex digits. Building from source."
-    return 1
-  fi
-  local url="https://github.com/Ph-ill/pi-sideloader/releases/download/${PREBUILT_TAG}/sideload-pi-prebuilt-armv6.tar.gz"
-  local tmp
-  tmp="$(mktemp -d)"
-  if ! curl -fsSL --retry 3 --retry-delay 2 -o "$tmp/prebuilt.tar.gz" "$url"; then
-    echo "Could not download $url (no release yet, or this Pi is offline)."
-    rm -rf "$tmp"
-    return 1
-  fi
-  if ! (cd "$tmp" && echo "${PREBUILT_SHA256}  prebuilt.tar.gz" | sha256sum -c -); then
-    echo "Prebuilt checksum does not match prebuilt/armv6.env."
-    rm -rf "$tmp"
-    return 1
-  fi
-  if ! tar -C "$tmp" -xzf "$tmp/prebuilt.tar.gz"; then
-    echo "Prebuilt tarball could not be extracted."
-    rm -rf "$tmp"
-    return 1
-  fi
-  if ! manifest_matches_pins "$tmp/usr/local/share/sideload-pi/manifest.txt"; then
-    rm -rf "$tmp"
-    return 1
-  fi
-  if ! tar -C / -xzf "$tmp/prebuilt.tar.gz"; then
-    echo "Could not extract the prebuilt tarball."
-    rm -rf "$tmp"
-    return 1
-  fi
-  echo /usr/local/lib > /etc/ld.so.conf.d/sideload-pi.conf
-  if ! ldconfig; then
-    echo "ldconfig failed after extracting the prebuilt tarball."
-    rm -rf "$tmp"
-    return 1
-  fi
-  write_pin_stamps
-  rm -rf "$tmp"
-  echo "Installed prebuilt phone tools from ${PREBUILT_TAG}."
-  return 0
-}
-
 install_usbmuxd_unit() {
   cat > /etc/systemd/system/usbmuxd.service << 'EOF'
 [Unit]
@@ -236,6 +179,9 @@ enable_boot
 used_prebuilt=0
 if [[ "$BUILD_FROM_SOURCE" == 1 ]]; then
   echo "Building the phone tools from source (--build-from-source)."
+  # A stamp match must not skip the rebuild the flag asked for.
+  export FORCE_ZSIGN=1
+  export FORCE_LIBS=1
 else
   if try_prebuilt; then
     used_prebuilt=1

@@ -24,7 +24,7 @@ cd pi-sideloader
 sudo scripts/install.sh
 ```
 
-On a Pi Zero (`uname -m` is `armv6l`), this downloads a prebuilt zsign and libimobiledevice stack when `prebuilt/armv6.env` points at a published `prebuilt-*` release with a matching sha256. That build is ARMv6, not Debian armhf. If the release is missing, the checksum does not match, or you pass `--build-from-source`, the script compiles the pinned sources instead. Compiling on the Zero takes one to two hours. The download does not.
+On a Pi Zero (`uname -m` is `armv6l`), this downloads a prebuilt zsign and libimobiledevice stack when `prebuilt/armv6.env` points at a published `prebuilt-*` release with a matching sha256. The archive is checked before it is copied, and the tools are run before any stamp file is written. That build is ARMv6, not Debian armhf. If the release is missing, the checksum or a member does not match, or you pass `--build-from-source`, the script compiles the pinned sources instead. `--build-from-source` also rebuilds when a stamp already matches. Compiling on the Zero takes one to two hours. The download does not.
 
 ## Screens
 
