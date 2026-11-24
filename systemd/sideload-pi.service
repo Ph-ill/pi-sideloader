@@ -1,7 +1,7 @@
 [Unit]
 Description=sideload-pi IPA refresh
-After=network-online.target time-sync.target systemd-time-wait-sync.service usbmuxd.service
-Wants=network-online.target time-sync.target systemd-time-wait-sync.service
+After=network-online.target time-sync.target usbmuxd.service
+Wants=network-online.target time-sync.target
 
 [Service]
 Type=simple

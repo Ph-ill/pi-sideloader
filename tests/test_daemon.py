@@ -1,4 +1,5 @@
 import logging
+import subprocess
 from datetime import UTC, datetime, timedelta
 
 from sideload_pi.config import Config
@@ -9,6 +10,7 @@ from sideload_pi.layout import Layout, write_secret_text
 from sideload_pi.library import AppRecord, Library
 from sideload_pi.progress import ProgressEvent
 from sideload_pi.provisioner import Material
+from sideload_pi.scheduling import ntp_synchronized
 from sideload_pi.usb_power import reset_note_for_tests
 
 NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
@@ -181,6 +183,40 @@ def test_unsynced_clock_does_not_decide_a_refresh(tmp_path):
     daemon.tick(datetime(2020, 1, 1, tzinfo=UTC))
     assert daemon.phase == "waiting_for_clock"
     assert provisioner.calls == []
+
+
+def test_tick_with_ntp_none_refreshes_and_false_does_not(tmp_path, monkeypatch):
+    phone = Phone("UDID", "Pocket", "usb")
+    provisioner = _Provisioner(NOW + timedelta(days=7))
+    monkeypatch.setattr("sideload_pi.scheduling.shutil.which", lambda _name: None)
+    missing = _daemon(
+        tmp_path,
+        phone=phone,
+        provisioner=provisioner,
+        expiry=None,
+        clock_synced=ntp_synchronized,
+    )
+    missing.tick(NOW)
+    assert missing.phase == "success"
+    assert provisioner.calls == ["com.example.notes"]
+
+    monkeypatch.setattr("sideload_pi.scheduling.shutil.which", lambda _name: "/usr/bin/timedatectl")
+
+    def _timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="timedatectl", timeout=5)
+
+    monkeypatch.setattr("sideload_pi.scheduling.subprocess.run", _timeout)
+    failed = _daemon(
+        tmp_path,
+        phone=phone,
+        provisioner=provisioner,
+        expiry=None,
+        clock_synced=ntp_synchronized,
+    )
+    failed.tick(NOW)
+    assert failed.phase == "waiting_for_clock"
+    assert "NTP" in failed.message
+    assert provisioner.calls == ["com.example.notes"]
 
 
 def test_post_2026_clock_without_ntp_does_not_refresh(tmp_path):

@@ -31,11 +31,11 @@ def clock_is_sane(now: datetime) -> bool:
 
 
 def ntp_synchronized() -> bool | None:
-    """True or False from timedatectl, or None when the tool cannot be asked.
+    """True only when timedatectl prints ``yes``.
 
-    A missing timedatectl must not block a machine that has no systemd.
-    An explicit ``no`` still means the clock must not decide a refresh,
-    even when the year is already past 2026.
+    None means the binary is not installed, so a machine without systemd is
+    not stuck. A non-zero exit, a timeout, or any other stdout is False:
+    the clock must not decide a refresh, even when the year is past 2026.
     """
     if shutil.which("timedatectl") is None:
         return None
@@ -48,15 +48,12 @@ def ntp_synchronized() -> bool | None:
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    value = result.stdout.strip().lower()
-    if value == "yes":
-        return True
-    if value == "no":
         return False
-    return None
+    if result.returncode != 0:
+        return False
+    if result.stdout.strip().lower() == "yes":
+        return True
+    return False
 
 
 def ensure_aware(value: datetime) -> datetime:

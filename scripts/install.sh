@@ -190,6 +190,7 @@ Restart=always
 WantedBy=multi-user.target
 EOF
   if [[ -f /usr/local/src/usbmuxd/udev/39-usbmuxd.rules ]]; then
+    mkdir -p /etc/udev/rules.d
     sed 's|/usr/sbin/usbmuxd|/usr/local/sbin/usbmuxd|g' \
       /usr/local/src/usbmuxd/udev/39-usbmuxd.rules \
       > /etc/udev/rules.d/39-usbmuxd.rules
@@ -329,9 +330,10 @@ systemctl daemon-reload
 udevadm control --reload-rules || true
 systemctl enable --now avahi-daemon.service || true
 systemctl enable --now usbmuxd.service || true
-# Makes time-sync.target wait until the clock is actually stepped.
-# Not --now: that oneshot blocks until NTP, and install should not hang on it.
-systemctl enable systemd-time-wait-sync.service
+# Do not enable systemd-time-wait-sync.service. `sideload-pi enable` runs
+# `systemctl enable --now`, and that oneshot does not exit until NTP, so the
+# command can hang. The daemon starts anyway and refuses to refresh until
+# timedatectl reports NTPSynchronized=yes.
 release_swap
 
 echo
@@ -344,9 +346,11 @@ echo "during a refresh. This Pi cannot turn off USB power in software."
 echo
 echo "Stop the service before a panel test if you start it later. Then:"
 echo "  sudo systemctl stop sideload-pi"
-echo "  sudo sideload-pi display-test V4"
-echo "Power-cycle and try V3, V2, or V1 if the pattern is snow or blank."
-echo "Set display.version in /etc/sideload-pi/config.json."
+echo "  sudo sideload-pi display-test V1"
+echo "Power-cycle and try V2, then V3, then V4 if the pattern is snow or blank."
+echo "Answer y only when the card is sharp. That records the driver."
+echo "The installed default is display.version V4, which enable accepts."
+echo "auto stays blocked until that confirmation is recorded."
 echo
 echo "Next: set anisette_url, then sudo sideload-pi login, then sudo sideload-pi enable."
 echo "See docs/SETUP.md. apt's ideviceinstaller is not used."

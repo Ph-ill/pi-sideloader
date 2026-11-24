@@ -1,7 +1,7 @@
 """Local web page for status, IPA upload, refresh, and the Apple verification code.
 
 It listens on 127.0.0.1 unless `web.allow_remote` is set. Every request needs
-the token from the root-only web.token file, sent as a cookie or as
+the token from the sideload-owned web.token file (mode 0600, directory 0700), sent as a cookie or as
 `Authorization: Bearer`.
 """
 

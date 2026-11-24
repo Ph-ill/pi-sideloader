@@ -77,6 +77,75 @@ def test_auto_falls_through_to_v1_when_newer_inits_stay_busy():
     assert panel.version == "V1"
 
 
+class _Panel:
+    def show(self, image, full):
+        return None
+
+    def sleep(self):
+        return None
+
+    def close(self):
+        return None
+
+
+def _display_config(tmp_path, version="V4"):
+    import json
+
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"root": str(tmp_path), "anisette_url": "http://anisette.local", "display": {"version": version}}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_display_test_records_only_after_confirmation(tmp_path, monkeypatch):
+    from sideload_pi.cli import main
+
+    monkeypatch.setattr("sideload_pi.cli._service_active", lambda: False)
+    monkeypatch.setattr("sideload_pi.cli.open_panel", lambda *args, **kwargs: _Panel())
+    config = _display_config(tmp_path, "auto")
+    answers = iter(["n", "y"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    assert main(["--config", str(config), "display-test", "V1"]) == 0
+    assert not (tmp_path / "display-version").exists()
+    assert main(["--config", str(config), "display-test", "V1"]) == 0
+    assert (tmp_path / "display-version").read_text(encoding="utf-8") == "V1\n"
+
+
+def test_display_test_yes_flag_records_without_a_prompt(tmp_path, monkeypatch):
+    from sideload_pi.cli import main
+
+    monkeypatch.setattr("sideload_pi.cli._service_active", lambda: False)
+    monkeypatch.setattr("sideload_pi.cli.open_panel", lambda *args, **kwargs: _Panel())
+
+    def _refuse(_prompt):
+        raise AssertionError("display-test --yes must not prompt")
+
+    monkeypatch.setattr("builtins.input", _refuse)
+    config = _display_config(tmp_path, "V4")
+    assert main(["--config", str(config), "display-test", "V2", "--yes"]) == 0
+    assert (tmp_path / "display-version").read_text(encoding="utf-8") == "V2\n"
+
+
+def test_enable_accepts_default_v4_and_blocks_unconfirmed_auto(tmp_path):
+    from sideload_pi.cli import enable_problems
+    from sideload_pi.config import Config
+    from sideload_pi.layout import Layout
+
+    layout = Layout(tmp_path)
+    layout.ensure()
+    layout.account.write_text("{}\n", encoding="utf-8")
+    default = Config(root=tmp_path, anisette_url="http://anisette.local")
+    assert default.display.version == "V4"
+    assert enable_problems(default, layout) == []
+    default.display.version = "auto"
+    blocked = enable_problems(default, layout)
+    assert any("auto" in item for item in blocked)
+    layout.display_version.write_text("V1\n", encoding="utf-8")
+    assert enable_problems(default, layout) == []
+
+
 def test_display_test_preview_does_not_need_the_panel(tmp_path, monkeypatch):
     from sideload_pi.cli import main
 

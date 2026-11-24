@@ -95,6 +95,34 @@ def test_timedatectl_no_is_not_synced(monkeypatch):
     assert ntp_synchronized() is False
 
 
+def test_timedatectl_failure_is_not_synced(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr("sideload_pi.scheduling.shutil.which", lambda _name: "/usr/bin/timedatectl")
+
+    class _Result:
+        def __init__(self, returncode, stdout):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    monkeypatch.setattr(
+        "sideload_pi.scheduling.subprocess.run",
+        lambda *_args, **_kwargs: _Result(1, ""),
+    )
+    assert ntp_synchronized() is False
+    monkeypatch.setattr(
+        "sideload_pi.scheduling.subprocess.run",
+        lambda *_args, **_kwargs: _Result(0, "maybe\n"),
+    )
+    assert ntp_synchronized() is False
+
+    def _timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="timedatectl", timeout=5)
+
+    monkeypatch.setattr("sideload_pi.scheduling.subprocess.run", _timeout)
+    assert ntp_synchronized() is False
+
+
 def test_fourth_app_is_refused_and_extensions_count_when_kept():
     existing = ["a.b.c", "d.e.f", "g.h.i"]
     assert_can_add_app(existing, "a.b.c", 3)

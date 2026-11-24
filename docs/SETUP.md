@@ -82,7 +82,7 @@ cd pi-sideloader
 sudo scripts/install.sh
 ```
 
-The script is safe to run again. It enables I2C and SPI in `/boot/firmware/config.txt` (or `/boot/config.txt` on older images), builds `libplist`, `libtatsu`, `libimobiledevice-glue`, `libusbmuxd`, `libimobiledevice`, `usbmuxd`, and `ideviceinstaller` from the commits pinned in `scripts/install.sh`, and builds [zsign](https://github.com/zhlynn/zsign) at the commit of pull request 391 (`make -C build/linux -j1`). `libimobiledevice` at that pin needs `libtatsu` >= 1.0.3, which apt does not ship, so the script builds it after `libplist`. Bookworm's phone packages are not used: `libimobiledevice` 1.3.0 is too old for iOS 17, and `ideviceinstaller` 1.1.1 has no `list --xml`. Apt does supply `libcurl` and `libzip` (`libcurl4-openssl-dev`, `libzip-dev`), which `libtatsu` and `ideviceinstaller` require. It also installs `avahi-daemon` so a later Wi-Fi lookup can resolve the phone, and enables `systemd-time-wait-sync.service` so the daemon does not start on an unsynced clock. A temporary swap file is added only while those compiles run, and only if the Pi has no swap yet.
+The script is safe to run again. It enables I2C and SPI in `/boot/firmware/config.txt` (or `/boot/config.txt` on older images), builds `libplist`, `libtatsu`, `libimobiledevice-glue`, `libusbmuxd`, `libimobiledevice`, `usbmuxd`, and `ideviceinstaller` from the commits pinned in `scripts/install.sh`, and builds [zsign](https://github.com/zhlynn/zsign) at the commit of pull request 391 (`make -C build/linux -j1`). `libimobiledevice` at that pin needs `libtatsu` >= 1.0.3, which apt does not ship, so the script builds it after `libplist`. Bookworm's phone packages are not used: `libimobiledevice` 1.3.0 is too old for iOS 17, and `ideviceinstaller` 1.1.1 has no `list --xml`. Apt does supply `libcurl` and `libzip` (`libcurl4-openssl-dev`, `libzip-dev`), which `libtatsu` and `ideviceinstaller` require. It also installs `avahi-daemon` so a later Wi-Fi lookup can resolve the phone. It does not enable `systemd-time-wait-sync.service`: that oneshot does not exit until NTP, and `sudo sideload-pi enable` runs `systemctl enable --now`, which would hang on it. The daemon starts anyway. Each tick paints `waiting_for_clock` and does not refresh until the clock is at least 2026-01-01 and `timedatectl show -p NTPSynchronized --value` is `yes`. If the `timedatectl` binary is missing, only the date check applies. A non-zero exit, a timeout, or any other output counts as not synced. A temporary swap file is added only while those compiles run, and only if the Pi has no swap yet.
 
 It does **not** start `sideload-pi.service`. The panel test, `anisette_url`, and `sideload-pi login` come first. `sudo sideload-pi enable` is the step that starts the daemon.
 
@@ -130,12 +130,14 @@ sudo systemctl stop sideload-pi
 sudo sideload-pi display-test V1
 ```
 
-You should see a card titled **TEST V1**, four solid bars, and a line that says the label should be crisp. Compare it with [docs/previews/test-v1.png](previews/test-v1.png). Then, only if that card was snow, blank, or the panel stayed busy:
+You should see a card titled **TEST V1**, four solid bars, and a line that says the label should be crisp. Compare it with [docs/previews/test-v1.png](previews/test-v1.png). The command then asks whether that card looked sharp (`y` or `N`, default no). A finished init is not proof: the V1 sequence never reads BUSY, so a wrong driver can return without an error. Nothing is written until you answer `y` or pass `--yes`.
+
+If the card was snow, blank, or the panel stayed busy, answer `n`:
 
 1. Power-cycle the Pi. A wrong waveform can leave the controller busy. Do not chain the four tests without a power cycle.
-2. `sudo sideload-pi display-test V2`, then V3, then V4, same rule.
+2. `sudo sideload-pi display-test V2`, then V3, then V4, same question.
 
-When one card is sharp and the words match the driver you asked for, that `display-test` writes the driver name to `/var/lib/sideload-pi/display-version`. `display.version` can stay `auto`: `sudo sideload-pi enable` accepts the recorded file. You can also set the version explicitly in `/etc/sideload-pi/config.json`:
+A yes records the driver in `/var/lib/sideload-pi/display-version`. The daemon and `enable` use that file when it exists, including when `display.version` is still the shipped default `V4` or `auto`. With no file, the installed default `V4` is an explicit choice and `enable` accepts it. `auto` with no confirmed file is refused. You can also set the version yourself in `/etc/sideload-pi/config.json`:
 
 ```json
 "display": { "version": "V1", "allow_partial": true }
@@ -193,7 +195,7 @@ The daemon starts only after the panel test, `anisette_url`, and this login:
 sudo sideload-pi enable
 ```
 
-That refuses to start while `anisette_url` is empty, no Apple ID is saved, or `display.version` is `auto` and `display-test` has not recorded a driver.
+That refuses to start while `anisette_url` is empty or no Apple ID is saved. The installed `display.version` is `V4`, and that explicit value is enough. `auto` is refused until `display-test` has recorded a driver you confirmed (or `--yes`). `enable` does not wait for NTP. The daemon starts, and a tick paints `waiting_for_clock` until the clock is synced.
 
 ## 9. Trust and Developer Mode
 

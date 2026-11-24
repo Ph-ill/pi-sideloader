@@ -208,8 +208,8 @@ class Daemon:
                 detail = "Clock is before 2026-01-01. Waiting for time-sync before any refresh."
             else:
                 detail = (
-                    "NTP is not synchronized (timedatectl NTPSynchronized is not yes). "
-                    "Waiting before any refresh."
+                    "NTP is not synchronized. timedatectl did not report "
+                    "NTPSynchronized=yes. Waiting before any refresh."
                 )
             self._set("waiting_for_clock", detail)
             self._paint(now)
@@ -557,20 +557,25 @@ def open_battery(config) -> Cw2015 | None:
 def open_display(config, layout: Layout):
     if not config.display.enabled:
         return None
+    # A confirmed display-test writes this file. It wins over the config,
+    # including the shipped default of V4. auto with no file is not probed:
+    # V1's init never reads BUSY, so a guess must not be saved.
     saved = remembered_version(layout.display_version)
+    version = saved or config.display.version
+    if version == "auto":
+        log.warning("display.version is auto and display-test has not confirmed a driver")
+        return None
     try:
         panel = open_panel(
             lambda _version: LgpioIO(config),
-            config.display.version,
+            version,
             rotate=config.display.rotate,
             saved=saved,
-            busy_timeout=8 if config.display.version == "auto" else 20,
+            busy_timeout=20,
         )
     except Exception:
         log.exception("e-paper did not initialise; the daemon will keep running")
         return None
-    if config.display.version == "auto":
-        layout.display_version.write_text(panel.version + "\n")
     return panel
 
 

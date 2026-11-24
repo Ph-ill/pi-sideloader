@@ -22,7 +22,7 @@ CI runs on a desktop Python. It does not have a Pi, a panel, a UPS, an iPhone, o
 - **FairPlay IPAs** (anything with `SC_Info/`) are refused. This will not install App Store apps.
 - **Only this tool's development certificate is revoked**, and only when a new one is needed or Apple rejects the CSR for a full slot. A certificate you created in Xcode is not touched. If the slot is still full after that one revoke, the error tells you to use Xcode.
 - **hsc 434** is handled on the client (one retry, same SRP `A2k`) only when the anisette server accepts a resync. anisette-v3-server's `app.d` has no HTTP resync, and restarting it does not apply one. A 434 against that server stops login and tells you to wipe its provisioning data or wait and retry. That path was not run against Apple.
-- **The Apple ID password sits on the SD card** in a root-only file. That is what unattended refresh requires. Use a dedicated Apple ID. Turn on full-disk encryption yourself if you want it; Raspberry Pi OS Lite does not.
+- **The Apple ID password sits on the SD card** in a sideload-owned file, mode 0600, in a directory mode 0700. That is what unattended refresh requires. Use a dedicated Apple ID. Turn on full-disk encryption yourself if you want it; Raspberry Pi OS Lite does not.
 - **Low-battery shutdown is off** until the UPS pads are soldered and both config flags are set. A floating GPIO 4 must not be trusted.
 - **The web UI is loopback-only** until you opt in. Tailscale SSH is the remote path this was written for.
 - **One app per pass.** A library of three due apps takes three ticks.

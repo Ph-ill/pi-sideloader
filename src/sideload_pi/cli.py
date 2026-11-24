@@ -15,7 +15,7 @@ from pathlib import Path
 from sideload_pi import __version__
 from sideload_pi.config import load_config
 from sideload_pi.daemon import build, pop_code, read_live_status, submit_code
-from sideload_pi.display.epd import DRIVERS, LgpioIO, open_panel
+from sideload_pi.display.epd import DRIVERS, LgpioIO, open_panel, remembered_version
 from sideload_pi.display.screens import render_test_pattern, write_gallery, write_test_patterns
 from sideload_pi.errors import SideloadError
 from sideload_pi.layout import Layout
@@ -50,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="write the pattern PNG here instead of talking to the panel",
+    )
+    probe.add_argument(
+        "--yes",
+        action="store_true",
+        help="record this driver without asking whether the card looked sharp",
     )
     args = parser.parse_args(argv)
     if args.version:
@@ -101,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "pair":
             return _pair(config)
         if args.command == "display-test":
-            return _display_test(config, args.driver)
+            return _display_test(config, args.driver, assume_yes=args.yes)
     except SideloadError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -139,26 +144,50 @@ def _status(config) -> int:
     return 0
 
 
-def _enable(config) -> int:
-    if os.geteuid() != 0:
-        raise SideloadError("Run sudo sideload-pi enable after login and the display test.")
-    layout = Layout(config.root)
+def enable_problems(config, layout: Layout) -> list[str]:
+    """Why `enable` should refuse. The shipped default V4 needs no side file.
+
+    `auto` is accepted only after display-test has recorded a confirmed driver.
+    An explicit V1–V4, including that default, is itself the choice.
+    """
     problems = []
     if not config.anisette_url:
         problems.append("anisette_url is empty in the config")
     if not layout.account.exists():
         problems.append("no Apple ID is saved (sideload-pi login)")
-    if config.display.version == "auto" and not layout.display_version.exists():
-        problems.append("display.version is auto and display-test has not recorded a revision")
+    recorded = remembered_version(layout.display_version)
+    if config.display.version == "auto" and recorded is None:
+        problems.append(
+            "display.version is auto and display-test has not confirmed a driver. "
+            "The shipped default is V4, which does not need that file. "
+            "auto does, and only after you answer y (or pass --yes)."
+        )
+    return problems
+
+
+def _enable(config) -> int:
+    if os.geteuid() != 0:
+        raise SideloadError("Run sudo sideload-pi enable after login and the display test.")
+    layout = Layout(config.root)
+    problems = enable_problems(config, layout)
     if problems:
         raise SideloadError(
             "Not starting the daemon yet:\n- " + "\n- ".join(problems)
         )
     subprocess.run(["/bin/systemctl", "daemon-reload"], check=False)
-    result = subprocess.run(
-        ["/bin/systemctl", "enable", "--now", "sideload-pi.service"],
-        check=False,
-    )
+    # The unit does not wait on systemd-time-wait-sync.service. Bound the
+    # call anyway so a stuck dependency cannot leave this command hanging.
+    try:
+        result = subprocess.run(
+            ["/bin/systemctl", "enable", "--now", "sideload-pi.service"],
+            check=False,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SideloadError(
+            "systemctl enable --now sideload-pi.service did not return within 60s. "
+            "The daemon does not wait for NTP before it starts."
+        ) from exc
     if result.returncode != 0:
         raise SideloadError("systemctl enable --now sideload-pi.service failed")
     print("sideload-pi.service is enabled and running.")
@@ -245,7 +274,7 @@ def _refresh(config, bundle_id: str) -> int:
     return 0
 
 
-def _display_test(config, driver: str | None) -> int:
+def _display_test(config, driver: str | None, *, assume_yes: bool = False) -> int:
     if _service_active():
         raise SideloadError(
             "sideload-pi.service is running and holds the panel. "
@@ -280,16 +309,26 @@ def _display_test(config, driver: str | None) -> int:
         note = "full refresh only, so the progress bar updates slowly on purpose"
     else:
         note = "partial refresh is available"
+    print(f"Showed the {version} test pattern ({note}).")
+    print(
+        "A finished init is not proof. V1 never reads BUSY, so a wrong driver "
+        "can return without an error."
+    )
+    if not assume_yes:
+        answer = input("Did the card look sharp, with the right TEST label? [y/N] ").strip().lower()
+        if answer not in {"y", "yes"}:
+            print("Not recorded. Power-cycle and try the next driver.")
+            return 0
     layout = Layout(config.root)
     layout.ensure()
     layout.display_version.write_text(version + "\n")
-    print(f"Showed the {version} test pattern ({note}).")
     print(f"Recorded {version} in {layout.display_version}.")
     print(
-        "If the label is crisp, leave display.version on auto or set it to this. "
-        "Then set anisette_url, log in, and run sudo sideload-pi enable."
+        "The daemon and enable use that file when it exists. "
+        "The shipped default display.version is V4, which enable accepts with no file. "
+        "auto stays blocked until this confirmation. "
+        "Next: set anisette_url, log in, then sudo sideload-pi enable."
     )
-    print("If it is snow, blank, or stuck, power-cycle and try the next driver.")
     return 0
 
 
