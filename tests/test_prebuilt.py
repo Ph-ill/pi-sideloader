@@ -51,14 +51,14 @@ def test_phone_stack_pins_are_full_shas_and_install_does_not_restate_them():
         assert f"{name}=" not in install
 
 
-def test_recorded_prebuilt_env_is_empty_until_a_release_exists():
+def test_recorded_prebuilt_env_names_the_published_release():
     text = ENV.read_text(encoding="utf-8")
-    assert "PREBUILT_TAG=" in text
-    assert "PREBUILT_SHA256=" in text
-    # A published checksum is 64 hex digits on the same line as the key.
-    # Empty means install.sh compiles. A half-written value must not sneak in.
-    assert re.search(r"^PREBUILT_SHA256=\s*$", text, re.MULTILINE)
-    assert re.search(r"^PREBUILT_TAG=\s*$", text, re.MULTILINE)
+    assert re.search(r"^PREBUILT_TAG=prebuilt-2026-11-24\s*$", text, re.MULTILINE)
+    assert re.search(
+        r"^PREBUILT_SHA256=3190c6320afca977bbbd72ba68643fdd61ca43f9dbf14b82feb96443d009d1a5\s*$",
+        text,
+        re.MULTILINE,
+    )
 
 
 def test_prebuilt_workflow_targets_raspbian_armv6_not_debian_armhf():
