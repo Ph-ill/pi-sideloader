@@ -24,7 +24,7 @@ cd pi-sideloader
 sudo scripts/install.sh
 ```
 
-On a Pi Zero (`uname -m` is `armv6l`), this downloads a prebuilt zsign and libimobiledevice stack when `prebuilt/armv6.env` points at a published `prebuilt-*` release with a matching sha256. The archive is checked before it is copied, and the tools are run before any stamp file is written. That build is ARMv6, not Debian armhf. If the release is missing, the checksum or a member does not match, or you pass `--build-from-source`, the script compiles the pinned sources instead. `--build-from-source` also rebuilds when a stamp already matches. Compiling on the Zero takes one to two hours. The download does not.
+Clone `main`. There is no branch to check out. On a Pi Zero this downloads the published ARMv6 tools. The full order, including the cable and the panel test, is [docs/SETUP.md](docs/SETUP.md).
 
 ## Screens
 
@@ -44,7 +44,7 @@ Driver test cards, one per revision: [V1](docs/previews/test-v1.png), [V2](docs/
 
 ```sh
 sudo sideload-pi login              # once, including the Apple verification code
-sudo sideload-pi enable             # after display-test, anisette_url, and login
+sudo sideload-pi enable             # after display-test and login
 sudo sideload-pi add ~/Notes.ipa
 sudo sideload-pi status
 sudo sideload-pi refresh            # or plug the phone in and let the daemon notice
