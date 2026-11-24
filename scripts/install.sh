@@ -5,10 +5,24 @@
 # Bookworm's apt packages are not used for the phone stack:
 #   libimobiledevice 1.3.0 is too old for iOS 17+, and ideviceinstaller 1.1.1
 #   has no `list --xml` (it only has `-o xml`). Both are built from the pinned
-#   commits below. zsign is pinned at or after zhlynn/zsign#391.
+#   commits in scripts/phone-stack.sh. zsign is pinned at or after zhlynn/zsign#391.
+# On an armv6l Pi, a recorded prebuilt tarball is installed instead of compiling.
+# Pass --build-from-source to skip that download.
 # The daemon is not started here. Run display-test, set anisette_url, log in,
 # then `sudo sideload-pi enable`.
 set -euo pipefail
+
+BUILD_FROM_SOURCE=0
+for arg in "$@"; do
+  case "$arg" in
+    --build-from-source) BUILD_FROM_SOURCE=1 ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      echo "Usage: sudo scripts/install.sh [--build-from-source]" >&2
+      exit 1
+      ;;
+  esac
+done
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "Run as root: sudo scripts/install.sh" >&2
@@ -17,26 +31,16 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export DEBIAN_FRONTEND=noninteractive
-export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-
-# zhlynn/zsign#391, SHA-256-only by default and canonical DER entitlements.
-ZSIGN_COMMIT=1075760146063026e4a04524de3142e6f376b179
-# Tips of the libimobiledevice projects on 2026-11-24. Not a claim they were
-# run against an iPhone from this repo.
-# libtatsu b8d518a7 is the master tip (verified: exists, NEWS Version 1.1.1).
-# Tag 1.1.1 is the older commit 726b6fa32fc86d56c9022b260df2de525a444aea.
-# libimobiledevice 60bf03b4 has no fallback for libtatsu-1.0 >= 1.0.3.
-LIBPLIST_COMMIT=b3f14c22dbb29056c0d3c37bb9b2401ffdb7bc8f
-LIBTATSU_COMMIT=b8d518a7d188c8c98dd9e6debb855bb2809699ee
-LIBIMOBILEDEVICE_GLUE_COMMIT=420053a5fc536062014a121e14d847db914be999
-LIBUSBMUXD_COMMIT=1498dee3aadf66dbae10e699d71c62b428a511a3
-LIBIMOBILEDEVICE_COMMIT=60bf03b4cac8ed5f52f803cdb031a404c0da3beb
-USBMUXD_COMMIT=f4d2e5fad43152f1ac1bdb804dfbd1cef5f0815b
-IDEVICEINSTALLER_COMMIT=1762d5f12fc590b48877aac644ba3bccb72f33f9
+# shellcheck source=phone-stack.sh
+source "$ROOT/scripts/phone-stack.sh"
+# shellcheck source=../prebuilt/armv6.env
+source "$ROOT/prebuilt/armv6.env"
 
 STAMP_DIR=/usr/local/share/sideload-pi
 CREATED_SWAP=""
 
+# Runtime libraries for the prebuilt binaries. The -dev packages are installed
+# only when this script falls through to a source build.
 apt-get update
 apt-get install -y \
   avahi-daemon \
@@ -47,20 +51,16 @@ apt-get install -y \
   python3-lgpio \
   python3-spidev \
   python3-pip \
-  git \
-  build-essential \
-  autoconf \
-  automake \
-  libtool \
-  pkg-config \
-  libssl-dev \
-  libusb-1.0-0-dev \
-  libavahi-client-dev \
-  libcurl4-openssl-dev \
-  libzip-dev \
-  zlib1g-dev \
+  curl \
+  ca-certificates \
   openssl \
-  ca-certificates
+  libssl3 \
+  libstdc++6 \
+  libusb-1.0-0 \
+  libavahi-client3 \
+  libcurl4 \
+  libzip4 \
+  zlib1g
 
 enable_boot() {
   local cfg=""
@@ -100,79 +100,77 @@ release_swap() {
 }
 trap release_swap EXIT
 
-fetch_commit() {
-  local src="$1" url="$2" commit="$3"
-  rm -rf "$src"
-  mkdir -p "$src"
-  git -C "$src" init -q
-  git -C "$src" remote add origin "$url"
-  git -C "$src" fetch --depth 1 origin "$commit"
-  git -C "$src" checkout --detach FETCH_HEAD
+install_build_dependencies() {
+  apt-get install -y \
+    git \
+    build-essential \
+    autoconf \
+    automake \
+    libtool \
+    pkg-config \
+    libssl-dev \
+    libusb-1.0-0-dev \
+    libavahi-client-dev \
+    libcurl4-openssl-dev \
+    libzip-dev \
+    zlib1g-dev
 }
 
-build_zsign() {
-  local stamp="$STAMP_DIR/zsign.stamp"
-  mkdir -p "$STAMP_DIR"
-  if [[ "${FORCE_ZSIGN:-0}" != "1" && -x /usr/local/bin/zsign && -f "$stamp" ]] \
-    && [[ "$(cat "$stamp")" == "$ZSIGN_COMMIT" ]]; then
-    echo "zsign is already the pinned build ($ZSIGN_COMMIT)."
-    return
+try_prebuilt() {
+  # set -e is off while this runs under `if`, so every failure returns 1.
+  if [[ "$(uname -m)" != "armv6l" ]]; then
+    echo "This machine is $(uname -m), not armv6l. The prebuilt tarball is not for it."
+    return 1
   fi
-  local src=/usr/local/src/zsign
-  fetch_commit "$src" https://github.com/zhlynn/zsign.git "$ZSIGN_COMMIT"
-  make -C "$src/build/linux" -j1
-  install -m 0755 "$src/bin/zsign" /usr/local/bin/zsign
-  echo "$ZSIGN_COMMIT" > "$stamp"
-  echo "zsign $ZSIGN_COMMIT installed."
-}
-
-# Depth-1 fetch of a raw SHA has no tags. git-version-gen then prints
-# "<NEWS version>-git-<sha>", and pkg-config rejects that suffix for every
-# >= check (confirmed: 2.8.1-git-... fails `libplist-2.0 >= 2.6.0`).
-# configure.ac calls ./git-version-gen $RELEASE_VERSION at autoconf time,
-# so a numeric NEWS version is what the .pc file must advertise.
-pin_pkgconfig_version() {
-  local version
-  version="$(sed -n 's/^Version \([[:digit:]][[:digit:].]*\).*/\1/p' NEWS | head -n 1)"
-  if [[ -z "$version" ]]; then
-    echo "NEWS has no numeric Version line in $PWD; pkg-config would reject the git version." >&2
-    exit 1
+  if stamps_already_match; then
+    echo "Pinned phone tools are already installed."
+    return 0
   fi
-  export RELEASE_VERSION="$version"
-  echo "pkg-config version for $(basename "$PWD") is $RELEASE_VERSION (shallow clone has no tags)."
-}
-
-require_pkg() {
-  if ! pkg-config --exists "$1"; then
-    local name="${1%% *}"
-    echo "pkg-config does not accept '$1' (reported: $(pkg-config --modversion "$name" 2>/dev/null || echo missing))." >&2
-    exit 1
+  if [[ -z "${PREBUILT_TAG}" || -z "${PREBUILT_SHA256}" ]]; then
+    echo "prebuilt/armv6.env has no release yet. Building from source."
+    return 1
   fi
-}
-
-build_autotools() {
-  local name="$1" url="$2" commit="$3"
-  shift 3
-  local stamp="$STAMP_DIR/${name}.stamp"
-  mkdir -p "$STAMP_DIR"
-  if [[ "${FORCE_LIBS:-0}" != "1" && -f "$stamp" && "$(cat "$stamp")" == "$commit" ]]; then
-    echo "$name is already at $commit."
-    return
+  if [[ ! "$PREBUILT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "PREBUILT_SHA256 is not 64 hex digits. Building from source."
+    return 1
   fi
-  local src="/usr/local/src/$name"
-  fetch_commit "$src" "$url" "$commit"
-  (
-    cd "$src"
-    pin_pkgconfig_version
-    ./autogen.sh
-    ./configure --prefix=/usr/local "$@"
-    make -j1
-    make install
-  )
+  local url="https://github.com/Ph-ill/pi-sideloader/releases/download/${PREBUILT_TAG}/sideload-pi-prebuilt-armv6.tar.gz"
+  local tmp
+  tmp="$(mktemp -d)"
+  if ! curl -fsSL --retry 3 --retry-delay 2 -o "$tmp/prebuilt.tar.gz" "$url"; then
+    echo "Could not download $url (no release yet, or this Pi is offline)."
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! (cd "$tmp" && echo "${PREBUILT_SHA256}  prebuilt.tar.gz" | sha256sum -c -); then
+    echo "Prebuilt checksum does not match prebuilt/armv6.env."
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! tar -C "$tmp" -xzf "$tmp/prebuilt.tar.gz"; then
+    echo "Prebuilt tarball could not be extracted."
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! manifest_matches_pins "$tmp/usr/local/share/sideload-pi/manifest.txt"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! tar -C / -xzf "$tmp/prebuilt.tar.gz"; then
+    echo "Could not extract the prebuilt tarball."
+    rm -rf "$tmp"
+    return 1
+  fi
   echo /usr/local/lib > /etc/ld.so.conf.d/sideload-pi.conf
-  ldconfig
-  echo "$commit" > "$stamp"
-  echo "$name $commit installed."
+  if ! ldconfig; then
+    echo "ldconfig failed after extracting the prebuilt tarball."
+    rm -rf "$tmp"
+    return 1
+  fi
+  write_pin_stamps
+  rm -rf "$tmp"
+  echo "Installed prebuilt phone tools from ${PREBUILT_TAG}."
+  return 0
 }
 
 install_usbmuxd_unit() {
@@ -189,34 +187,17 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-  if [[ -f /usr/local/src/usbmuxd/udev/39-usbmuxd.rules ]]; then
+  local rules=""
+  if [[ -f /usr/local/share/sideload-pi/39-usbmuxd.rules ]]; then
+    rules=/usr/local/share/sideload-pi/39-usbmuxd.rules
+  elif [[ -f /usr/local/src/usbmuxd/udev/39-usbmuxd.rules ]]; then
+    rules=/usr/local/src/usbmuxd/udev/39-usbmuxd.rules
+  fi
+  if [[ -n "$rules" ]]; then
     mkdir -p /etc/udev/rules.d
     sed 's|/usr/sbin/usbmuxd|/usr/local/sbin/usbmuxd|g' \
-      /usr/local/src/usbmuxd/udev/39-usbmuxd.rules \
-      > /etc/udev/rules.d/39-usbmuxd.rules
+      "$rules" > /etc/udev/rules.d/39-usbmuxd.rules
   fi
-}
-
-verify_phone_tools() {
-  local help
-  help="$(/usr/local/bin/ideviceinstaller --help 2>&1 || true)"
-  if ! grep -q -- '--xml' <<<"$help"; then
-    echo "The built ideviceinstaller does not advertise --xml. Refusing to finish." >&2
-    exit 1
-  fi
-  if [[ ! -x /usr/local/bin/idevice_id || ! -x /usr/local/sbin/usbmuxd ]]; then
-    echo "idevice_id or usbmuxd is missing from /usr/local." >&2
-    exit 1
-  fi
-  echo "ideviceinstaller supports list/install/upgrade --xml."
-  echo "Pinned commits:"
-  echo "  libplist $LIBPLIST_COMMIT"
-  echo "  libtatsu $LIBTATSU_COMMIT"
-  echo "  libimobiledevice-glue $LIBIMOBILEDEVICE_GLUE_COMMIT"
-  echo "  libusbmuxd $LIBUSBMUXD_COMMIT"
-  echo "  libimobiledevice $LIBIMOBILEDEVICE_COMMIT"
-  echo "  usbmuxd $USBMUXD_COMMIT"
-  echo "  ideviceinstaller $IDEVICEINSTALLER_COMMIT"
 }
 
 install_service_user() {
@@ -252,38 +233,21 @@ EOF
 }
 
 enable_boot
-ensure_swap
-# Hard PKG_CHECK_MODULES from the pinned configure.ac files (no fallback):
-#   libtatsu:            libplist-2.0 >= 2.6.0, libcurl >= 7.0
-#   libimobiledevice-glue: libplist-2.0 >= 2.3.0
-#   libusbmuxd:          libplist-2.0 >= 2.2.0, libimobiledevice-glue-1.0 >= 1.2.0
-#   libimobiledevice:    libusbmuxd-2.0 >= 2.0.2, libplist-2.0 >= 2.3.0,
-#                        libimobiledevice-glue-1.0 >= 1.3.0, libtatsu-1.0 >= 1.0.3,
-#                        openssl >= 0.9.8 (default; GnuTLS is the other choice)
-#   usbmuxd:             libusb-1.0 >= 1.0.9, libplist-2.0 >= 2.6.0,
-#                        libimobiledevice-glue-1.0 >= 1.0.0
-#                        (libimobiledevice-1.0 >= 1.3.0 is optional there)
-#   ideviceinstaller:    libimobiledevice-1.0 >= 1.3.0, libplist-2.0 >= 2.3.0,
-#                        libzip >= 0.10
-# pthread is libc. readline is optional. udev is auto. systemd is disabled
-# for usbmuxd because this script ships its own unit.
-require_pkg "libcurl >= 7.0"
-require_pkg "libzip >= 0.10"
-require_pkg "openssl >= 0.9.8"
-require_pkg "libusb-1.0 >= 1.0.9"
-build_zsign
-build_autotools libplist https://github.com/libimobiledevice/libplist.git "$LIBPLIST_COMMIT"
-require_pkg "libplist-2.0 >= 2.6.0"
-build_autotools libtatsu https://github.com/libimobiledevice/libtatsu.git "$LIBTATSU_COMMIT"
-require_pkg "libtatsu-1.0 >= 1.0.3"
-build_autotools libimobiledevice-glue https://github.com/libimobiledevice/libimobiledevice-glue.git "$LIBIMOBILEDEVICE_GLUE_COMMIT"
-require_pkg "libimobiledevice-glue-1.0 >= 1.3.0"
-build_autotools libusbmuxd https://github.com/libimobiledevice/libusbmuxd.git "$LIBUSBMUXD_COMMIT"
-require_pkg "libusbmuxd-2.0 >= 2.0.2"
-build_autotools libimobiledevice https://github.com/libimobiledevice/libimobiledevice.git "$LIBIMOBILEDEVICE_COMMIT"
-require_pkg "libimobiledevice-1.0 >= 1.3.0"
-build_autotools usbmuxd https://github.com/libimobiledevice/usbmuxd.git "$USBMUXD_COMMIT" --without-systemd
-build_autotools ideviceinstaller https://github.com/libimobiledevice/ideviceinstaller.git "$IDEVICEINSTALLER_COMMIT"
+used_prebuilt=0
+if [[ "$BUILD_FROM_SOURCE" == 1 ]]; then
+  echo "Building the phone tools from source (--build-from-source)."
+else
+  if try_prebuilt; then
+    used_prebuilt=1
+  else
+    echo "Prebuilt install was not used. Building the phone tools from source."
+  fi
+fi
+if [[ "$used_prebuilt" != 1 ]]; then
+  install_build_dependencies
+  ensure_swap
+  MAKE_JOBS=1 build_phone_stack
+fi
 install_usbmuxd_unit
 verify_phone_tools
 
@@ -353,4 +317,9 @@ echo "The installed default is display.version V4, which enable accepts."
 echo "auto stays blocked until that confirmation is recorded."
 echo
 echo "Next: set anisette_url, then sudo sideload-pi login, then sudo sideload-pi enable."
+if [[ "$used_prebuilt" == 1 ]]; then
+  echo "Phone tools came from the ${PREBUILT_TAG} prebuilt tarball (no compile)."
+else
+  echo "Phone tools were compiled from the pinned sources."
+fi
 echo "See docs/SETUP.md. apt's ideviceinstaller is not used."

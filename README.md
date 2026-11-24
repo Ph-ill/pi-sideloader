@@ -16,6 +16,16 @@ This is for apps you built. It will not install App Store downloads. FairPlay-en
 
 The step-by-step, including how the phone is cabled and how to tell which e-paper you have, is [docs/SETUP.md](docs/SETUP.md). Why these tools and not the others is [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). What has not been tried on real hardware is [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
+## Install
+
+```sh
+git clone https://github.com/Ph-ill/pi-sideloader.git
+cd pi-sideloader
+sudo scripts/install.sh
+```
+
+On a Pi Zero (`uname -m` is `armv6l`), this downloads a prebuilt zsign and libimobiledevice stack when `prebuilt/armv6.env` points at a published `prebuilt-*` release with a matching sha256. That build is ARMv6, not Debian armhf. If the release is missing, the checksum does not match, or you pass `--build-from-source`, the script compiles the pinned sources instead. Compiling on the Zero takes one to two hours. The download does not.
+
 ## Screens
 
 The pictures below are rendered with Pillow on a desktop. They are the same bitmaps the panel is sent.

@@ -82,7 +82,9 @@ cd pi-sideloader
 sudo scripts/install.sh
 ```
 
-The script is safe to run again. It enables I2C and SPI in `/boot/firmware/config.txt` (or `/boot/config.txt` on older images), builds `libplist`, `libtatsu`, `libimobiledevice-glue`, `libusbmuxd`, `libimobiledevice`, `usbmuxd`, and `ideviceinstaller` from the commits pinned in `scripts/install.sh`, and builds [zsign](https://github.com/zhlynn/zsign) at the commit of pull request 391 (`make -C build/linux -j1`). `libimobiledevice` at that pin needs `libtatsu` >= 1.0.3, which apt does not ship, so the script builds it after `libplist`. Bookworm's phone packages are not used: `libimobiledevice` 1.3.0 is too old for iOS 17, and `ideviceinstaller` 1.1.1 has no `list --xml`. Apt does supply `libcurl` and `libzip` (`libcurl4-openssl-dev`, `libzip-dev`), which `libtatsu` and `ideviceinstaller` require. It also installs `avahi-daemon` so a later Wi-Fi lookup can resolve the phone. It does not enable `systemd-time-wait-sync.service`: that oneshot does not exit until NTP, and `sudo sideload-pi enable` runs `systemctl enable --now`, which would hang on it. The daemon starts anyway. Each tick paints `waiting_for_clock` and does not refresh until the clock is at least 2026-01-01 and `timedatectl show -p NTPSynchronized --value` is `yes`. If the `timedatectl` binary is missing, only the date check applies. A non-zero exit, a timeout, or any other output counts as not synced. A temporary swap file is added only while those compiles run, and only if the Pi has no swap yet.
+On an armv6l Pi, that command downloads a prebuilt tarball when `prebuilt/armv6.env` names a published `prebuilt-*` release and the committed sha256 matches. The tarball is zsign plus the pinned phone stack, built for ARMv6 (not Debian's armhf, which is ARMv7). Checksums, a missing release, an offline Pi, or any machine that is not `armv6l` all fall back to compiling. `sudo scripts/install.sh --build-from-source` skips the download. Until the first release exists, the env file is empty and every install compiles.
+
+The script is safe to run again. It enables I2C and SPI in `/boot/firmware/config.txt` (or `/boot/config.txt` on older images). A source build compiles `libplist`, `libtatsu`, `libimobiledevice-glue`, `libusbmuxd`, `libimobiledevice`, `usbmuxd`, and `ideviceinstaller` from the commits in `scripts/phone-stack.sh` (the same file the prebuilt workflow uses), and builds [zsign](https://github.com/zhlynn/zsign) at the commit of pull request 391 (`make -C build/linux -j1`). `libimobiledevice` at that pin needs `libtatsu` >= 1.0.3, which apt does not ship. Bookworm's phone packages are not used: `libimobiledevice` 1.3.0 is too old for iOS 17, and `ideviceinstaller` 1.1.1 has no `list --xml`. A source build needs the `-dev` packages (`libcurl4-openssl-dev`, `libzip-dev`, and the rest). A prebuilt install only installs the runtime libraries (`libssl3`, `libstdc++6`, `libusb-1.0-0`, `libavahi-client3`, `libcurl4`, `libzip4`, `zlib1g`). It also installs `avahi-daemon` so a later Wi-Fi lookup can resolve the phone. It does not enable `systemd-time-wait-sync.service`: that oneshot does not exit until NTP, and `sudo sideload-pi enable` runs `systemctl enable --now`, which would hang on it. The daemon starts anyway. Each tick paints `waiting_for_clock` and does not refresh until the clock is at least 2026-01-01 and `timedatectl show -p NTPSynchronized --value` is `yes`. If the `timedatectl` binary is missing, only the date check applies. A non-zero exit, a timeout, or any other output counts as not synced. A temporary swap file is added only while those compiles run, and only if the Pi has no swap yet.
 
 It does **not** start `sideload-pi.service`. The panel test, `anisette_url`, and `sideload-pi login` come first. `sudo sideload-pi enable` is the step that starts the daemon.
 
@@ -91,6 +93,29 @@ Python's cryptography and Pillow come from apt (`python3-cryptography`, `python3
 The daemon runs as the system user `sideload` (groups `gpio`, `spi`, `i2c`, and `plugdev` when those groups exist). `sudo sideload-pi` drops to that user for every command except `enable`, so the Apple ID file stays readable by the service. Installing packages, udev rules, and `systemctl enable` still need root. Low-battery shutdown is the only thing the service does as root, via a sudoers rule that allows `systemctl poweroff` and nothing else. GPIO, SPI, and the usbmuxd socket are what the groups are for; if a group is missing on your image, say so in the install log and the drop-in omits it.
 
 It writes `/etc/sideload-pi/config.json` **only if that file does not exist**, creates `/var/lib/sideload-pi` mode 0700 owned by `sideload`, and generates `secrets/web.token` mode 0600 if it is missing. Re-running the installer does not rotate that token and does not wipe an Apple ID you have already saved.
+
+### Publishing a prebuilt tarball
+
+The pins live in `scripts/phone-stack.sh`. The workflow `.github/workflows/prebuilt.yml` builds them inside a Raspbian Bookworm armhf rootfs from `archive.raspbian.org`, with `-march=armv6`, and refuses the artifact unless `readelf -A` says `Tag_CPU_arch: v6` and `qemu-arm -cpu arm1176` can run `zsign -v` and `ideviceinstaller --help` (the help must mention `--xml`). Every run uploads the tarball and its sha256 as a workflow artifact. A GitHub Release is created only when a tag named `prebuilt-*` is pushed. This repo does not push that tag for you.
+
+After the workflow on the commit you want is green, download the artifact `sideload-pi-prebuilt-armv6` and read the first field of `sideload-pi-prebuilt-armv6.tar.gz.sha256`. Put it in `prebuilt/armv6.env`:
+
+```
+PREBUILT_TAG=prebuilt-2026-11-24
+PREBUILT_SHA256=<64 hex characters, no filename>
+```
+
+Then, from a checkout of that commit:
+
+```sh
+git add prebuilt/armv6.env
+git commit -m "Record the ARMv6 prebuilt checksum."
+git push origin main
+git tag prebuilt-2026-11-24
+git push origin prebuilt-2026-11-24
+```
+
+The tag push builds again and attaches `sideload-pi-prebuilt-armv6.tar.gz` and the `.sha256` file to the release. A second build is not guaranteed to hash the same. When that run is green, download the release asset's `.sha256`. If the hex differs from `PREBUILT_SHA256`, commit the new hex on `main` and push. Do not move the tag: install downloads `releases/download/prebuilt-2026-11-24/...` and checks it against the sha256 in the checkout it is running from.
 
 Reboot once so SPI and I2C come up:
 
