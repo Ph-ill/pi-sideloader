@@ -34,13 +34,14 @@ Driver test cards, one per revision: [V1](docs/previews/test-v1.png), [V2](docs/
 
 ```sh
 sudo sideload-pi login              # once, including the Apple verification code
+sudo sideload-pi enable             # after anisette_url and the display test
 sudo sideload-pi add ~/Notes.ipa
 sudo sideload-pi status
 sudo sideload-pi refresh            # or plug the phone in and let the daemon notice
 sudo sideload-pi 2fa 123456         # if a later refresh asks again
 ```
 
-The local web page listens on `127.0.0.1:8741` and asks for the token in `/var/lib/sideload-pi/secrets/web.token`. Reach it with SSH or Tailscale, not by opening the port on a cafe network.
+The local web page listens on `127.0.0.1:8741` and asks for the token in `/var/lib/sideload-pi/secrets/web.token`. Uploads are capped at 64 MB unless you raise `web.max_upload_mb`. Reach it with SSH or Tailscale, not by opening the port on a cafe network. Stop the daemon before `display-test`; it refuses to share the panel.
 
 ## License
 

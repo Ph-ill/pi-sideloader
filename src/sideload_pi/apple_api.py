@@ -9,9 +9,11 @@ not used to exercise this module.
 
 from __future__ import annotations
 
+import json
 import plistlib
 import uuid
 from dataclasses import dataclass
+from urllib.parse import quote, urlencode
 
 from sideload_pi.anisette import AnisetteData
 from sideload_pi.errors import AppleAPIError
@@ -19,9 +21,13 @@ from sideload_pi.gsa import gs_header
 from sideload_pi.http_client import UrllibHttp
 
 BASE = "https://developerservices2.apple.com/services/QH65B2/"
+# Free-team certificate list and revoke. SideSign uses this v1 JSON API
+# (POST + X-HTTP-Method-Override), not a QH65B2 plist action.
+CERTS_V1 = "https://developerservices2.apple.com/services/v1/certificates"
 
 _RESULT_TEXT = {
     35: "Apple rejected an identifier or name",
+    7460: "This account already has the maximum number of development certificates",
     3250: "Apple rejected the certificate request",
     7252: "That certificate does not exist",
     8101: "That provisioning profile does not exist",
@@ -46,6 +52,21 @@ class Team:
 class DeviceRecord:
     udid: str
     name: str
+
+
+@dataclass
+class IssuedCertificate:
+    der: bytes
+    serial: str = ""
+    cert_id: str = ""
+
+
+@dataclass
+class ListedCertificate:
+    cert_id: str
+    serial: str
+    machine_name: str
+    machine_id: str
 
 
 @dataclass
@@ -170,7 +191,7 @@ class DeveloperClient:
         machine_id: str,
         machine_name: str,
         anisette: AnisetteData,
-    ) -> bytes:
+    ) -> IssuedCertificate:
         data = self._post(
             "ios/submitDevelopmentCSR.action",
             {
@@ -183,9 +204,40 @@ class DeveloperClient:
         )
         cert_request = data.get("certRequest") or {}
         certificate = cert_request.get("certificate")
-        if isinstance(certificate, bytes) and certificate:
-            return certificate
-        raise AppleAPIError("Apple did not return a development certificate")
+        if not isinstance(certificate, bytes) or not certificate:
+            raise AppleAPIError("Apple did not return a development certificate")
+        serial = str(cert_request.get("serialNumber") or cert_request.get("serialNum") or "")
+        cert_id = str(cert_request.get("certificateId") or cert_request.get("certRequestId") or "")
+        return IssuedCertificate(der=certificate, serial=serial, cert_id=cert_id)
+
+    def list_development_certs(self, team_id: str, anisette: AnisetteData) -> list[ListedCertificate]:
+        query = urlencode(
+            {"teamId": team_id, "filter[certificateType]": "IOS_DEVELOPMENT"}
+        )
+        payload = self._services("GET", CERTS_V1, query, anisette)
+        found = []
+        for item in payload.get("data") or []:
+            if not isinstance(item, dict):
+                continue
+            attributes = item.get("attributes") or {}
+            cert_id = str(item.get("id") or "")
+            if not cert_id:
+                continue
+            found.append(
+                ListedCertificate(
+                    cert_id=cert_id,
+                    serial=str(attributes.get("serialNumber") or ""),
+                    machine_name=str(attributes.get("machineName") or ""),
+                    machine_id=str(attributes.get("machineId") or ""),
+                )
+            )
+        return found
+
+    def revoke_certificate(self, team_id: str, cert_id: str, anisette: AnisetteData) -> None:
+        if not cert_id:
+            raise AppleAPIError("refusing to revoke a certificate with no id")
+        query = urlencode({"teamId": team_id})
+        self._services("DELETE", f"{CERTS_V1}/{quote(cert_id, safe='')}", query, anisette)
 
     def download_profile(self, team_id: str, app_id_id: str, anisette: AnisetteData) -> bytes:
         data = self._post(
@@ -247,3 +299,43 @@ class DeveloperClient:
             )
             raise AppleAPIError(f"{text} (result {code_int})", code_int)
         return data
+
+    def _services(self, method: str, url: str, query: str, anisette: AnisetteData) -> dict:
+        headers = {
+            "Content-Type": "application/vnd.api+json",
+            "Accept": "application/vnd.api+json",
+            "User-Agent": "Xcode",
+            "Accept-Language": "en-us",
+            "X-Apple-App-Info": "com.apple.gs.xcode.auth",
+            "X-Xcode-Version": self.xcode_version,
+            "X-Apple-I-Identity-Id": self.adsid,
+            "X-Apple-GS-Token": gs_header(self.adsid, self.gs_token),
+            "X-HTTP-Method-Override": method,
+            **anisette.http_headers(),
+        }
+        response = self.http.request(
+            "POST",
+            url,
+            body=json.dumps({"urlEncodedQueryParams": query}).encode("utf-8"),
+            headers=headers,
+            timeout=self.timeout,
+        )
+        if response.status in {401, 403}:
+            raise AppleAPIError(f"Apple rejected the saved login (HTTP {response.status})", 401)
+        if response.status >= 400:
+            raise AppleAPIError(
+                f"Apple certificate services returned HTTP {response.status} for {method}"
+            )
+        if not response.body.strip():
+            return {}
+        try:
+            payload = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AppleAPIError("Apple certificate services did not return JSON") from exc
+        if not isinstance(payload, dict):
+            raise AppleAPIError("Apple certificate services returned an unexpected body")
+        errors = payload.get("errors")
+        if errors:
+            detail = errors[0].get("detail") if isinstance(errors[0], dict) else str(errors[0])
+            raise AppleAPIError(f"Apple certificate services: {detail}")
+        return payload

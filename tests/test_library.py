@@ -75,6 +75,47 @@ def test_fairplay_and_a_fourth_app_are_refused(tmp_path):
         )
 
 
+def test_kept_extension_counts_apps_already_in_the_library(tmp_path):
+    library = Library(Layout(tmp_path))
+    for bundle, name in (("com.example.one", "One"), ("com.example.two", "Two")):
+        path = tmp_path / f"{name}.ipa"
+        make_ipa(path, bundle=bundle, name=name)
+        library.add_ipa(
+            path,
+            max_apps=3,
+            strip_extensions=True,
+            now=NOW,
+            window=timedelta(days=7),
+            app_id_limit=10,
+        )
+    widget = tmp_path / "three.ipa"
+    make_ipa(
+        widget,
+        bundle="com.example.three",
+        name="Three",
+        extensions=("com.example.three.widget",),
+    )
+    with pytest.raises(LimitError):
+        library.add_ipa(
+            widget,
+            max_apps=3,
+            strip_extensions=False,
+            now=NOW,
+            window=timedelta(days=7),
+            app_id_limit=10,
+        )
+
+
+def test_corrupt_state_is_moved_aside_instead_of_crashing(tmp_path):
+    layout = Layout(tmp_path)
+    layout.ensure()
+    layout.state_path.write_text("{", encoding="utf-8")
+    library = Library(layout)
+    library.load()
+    assert library.apps == {}
+    assert any(path.name.startswith("state.json.broken-") for path in layout.root.iterdir())
+
+
 def test_profile_free_flag_and_seven_day_lifetime():
     created = NOW
     expiry = NOW + timedelta(days=7)

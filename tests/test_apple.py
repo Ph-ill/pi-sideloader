@@ -26,7 +26,7 @@ class _Http:
     def __init__(self, handler):
         self.handler = handler
 
-    def request(self, method, url, body=None, headers=None, timeout=None):
+    def request(self, method, url, body=None, headers=None, timeout=None, follow_redirects=True):
         return self.handler(method, url, body or b"", headers or {})
 
 
@@ -88,12 +88,16 @@ def _certificate_der() -> bytes:
 
 
 class _Dev:
-    def __init__(self, devices, app_ids=None, fail_add=None):
+    def __init__(self, devices, app_ids=None, fail_add=None, csr_error=None):
         self.devices = devices
         self.app_ids = list(app_ids or [])
         self.fail_add = fail_add
         self.added = []
         self.csr_calls = 0
+        self.revoked = []
+        self.certs = []
+        self.profile_errors = []
+        self.csr_error = csr_error
 
     def list_teams(self, anisette):
         return [Team("TEAM", "Personal", "Individual", "active")]
@@ -117,10 +121,27 @@ class _Dev:
         return created
 
     def submit_csr(self, team_id, csr, machine_id, machine_name, anisette):
+        from sideload_pi.apple_api import IssuedCertificate
+
         self.csr_calls += 1
-        return _certificate_der()
+        if getattr(self, "csr_error", None) and self.csr_calls == 1:
+            raise self.csr_error
+        return IssuedCertificate(_certificate_der(), serial="aa", cert_id="CID")
+
+    def list_development_certs(self, team_id, anisette):
+        if self.csr_calls and getattr(self, "certs_after_reject", None):
+            return list(self.certs_after_reject)
+        return list(self.certs)
+
+    def revoke_certificate(self, team_id, cert_id, anisette):
+        self.revoked.append(cert_id)
 
     def download_profile(self, team_id, app_id_id, anisette):
+        if self.profile_errors:
+            code = self.profile_errors.pop(0)
+            from sideload_pi.apple_api import AppleAPIError
+
+            raise AppleAPIError(f"stale {code}", code)
         blob = plistlib.dumps(
             {
                 "Name": "profile",
@@ -144,6 +165,14 @@ def _provisioner(tmp_path, dev):
     save_account(layout, AccountSecrets(apple_id="person@example.com", password="pw", adsid="ads", gs_token="tok"))
 
     def http(method, url, body, headers):
+        if str(url).endswith("/v3/client_info"):
+            return HttpResponse(
+                200,
+                json.dumps(
+                    {"client_info": "<PC> <Windows>", "user_agent": "akd/1.0 CFNetwork/808.1.4"}
+                ).encode(),
+                {},
+            )
         return HttpResponse(200, _anisette_payload(), {})
 
     return Provisioner(config, layout, library, http=_Http(http), client_factory=lambda adsid, token: dev), library
@@ -195,6 +224,97 @@ def test_unknown_account_reports_apples_device_error(tmp_path):
     library.apps["com.example.notes"] = AppRecord("com.example.notes", "Notes", "1", "notes.ipa")
     with pytest.raises(SideloadError, match="3 devices"):
         provisioner.provision("com.example.notes", "Notes", "NEW", "Phone", lambda kind: "", NOW)
+
+
+def test_client_info_comes_from_v3_not_the_v1_header():
+    def http(method, url, body, headers):
+        if str(url).endswith("/v3/client_info"):
+            return HttpResponse(
+                200,
+                json.dumps(
+                    {
+                        "client_info": "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1>",
+                        "user_agent": "akd/1.0 CFNetwork/808.1.4",
+                    }
+                ).encode(),
+                {},
+            )
+        return HttpResponse(
+            200,
+            json.dumps(
+                {
+                    "X-Apple-I-MD": "md",
+                    "X-Apple-I-MD-M": "mdm",
+                    "X-Mme-Device-Id": "dev",
+                    "X-MMe-Client-Info": "<MacBookPro13,2> <macOS;13.1;22C65>",
+                }
+            ).encode(),
+            {},
+        )
+
+    data = AnisetteClient("http://anisette.local", http=_Http(http)).fetch()
+    assert data.user_agent == "akd/1.0 CFNetwork/808.1.4"
+    assert data.client_info.startswith("<PC>")
+    assert data.cpd()["bootstrap"] == "true"
+    assert "X-Apple-I-MD-RINFO" not in data.cpd()
+
+
+def test_missing_app_id_is_created_again_and_counted(tmp_path):
+    from sideload_pi.library import AppRecord
+
+    dev = _Dev([])
+    provisioner, library = _provisioner(tmp_path, dev)
+    library.apps["com.example.notes"] = AppRecord(
+        "com.example.notes", "Notes", "1", "notes.ipa", app_id_id="STALE"
+    )
+    provisioner.provision("com.example.notes", "Notes", "NEW", "Phone", lambda kind: "", NOW)
+    assert library.apps["com.example.notes"].app_id_id == "APP1"
+    assert len(library.app_id_uses) == 1
+
+
+def test_profile_8201_recreates_the_app_id(tmp_path):
+    from sideload_pi.apple_api import AppIdRecord
+    from sideload_pi.library import AppRecord
+
+    dev = _Dev([], app_ids=[AppIdRecord("OLD", "com.example.notes", "Notes")])
+    dev.profile_errors = [8201]
+    provisioner, library = _provisioner(tmp_path, dev)
+    library.apps["com.example.notes"] = AppRecord(
+        "com.example.notes", "Notes", "1", "notes.ipa", app_id_id="OLD"
+    )
+    provisioner.provision("com.example.notes", "Notes", "NEW", "Phone", lambda kind: "", NOW)
+    assert library.apps["com.example.notes"].app_id_id == "APP1"
+    assert len(library.app_id_uses) == 1
+
+
+def test_tracked_certificate_is_revoked_before_a_new_csr(tmp_path):
+    from sideload_pi.apple_api import DeviceRecord, ListedCertificate
+    from sideload_pi.library import AppRecord
+
+    dev = _Dev([DeviceRecord("OLD", "Old")])
+    dev.certs = [ListedCertificate("CID", "aa", "sideload-pi", "device-id")]
+    provisioner, library = _provisioner(tmp_path, dev)
+    library.apps["com.example.notes"] = AppRecord("com.example.notes", "Notes", "1", "notes.ipa")
+    provisioner.layout.cert_meta.write_text(
+        json.dumps({"serial": "aa", "cert_id": "CID", "machine_name": "sideload-pi"}),
+        encoding="utf-8",
+    )
+    provisioner.provision("com.example.notes", "Notes", "NEW", "Phone", lambda kind: "", NOW)
+    assert dev.revoked == ["CID"]
+    assert dev.csr_calls == 1
+
+
+def test_rejected_csr_revokes_ours_and_retries_once(tmp_path):
+    from sideload_pi.apple_api import DeviceRecord, ListedCertificate
+    from sideload_pi.library import AppRecord
+
+    dev = _Dev([DeviceRecord("OLD", "Old")], csr_error=AppleAPIError("full", 35))
+    dev.certs_after_reject = [ListedCertificate("CID", "aa", "sideload-pi", "device-id")]
+    provisioner, library = _provisioner(tmp_path, dev)
+    library.apps["com.example.notes"] = AppRecord("com.example.notes", "Notes", "1", "notes.ipa")
+    provisioner.provision("com.example.notes", "Notes", "NEW", "Phone", lambda kind: "", NOW)
+    assert dev.revoked == ["CID"]
+    assert dev.csr_calls == 2
 
 
 def test_app_id_window_is_enforced_before_add(tmp_path):

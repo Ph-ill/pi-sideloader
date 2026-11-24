@@ -56,6 +56,15 @@ def test_v1_show_is_a_full_frame_even_when_partial_was_asked():
     assert (0x22, bytes([0xFF])) not in commands
 
 
+def test_v3_and_v4_partial_refresh_uses_a_one_millisecond_reset():
+    for version in ("V3", "V4"):
+        io = RecordingIO(busy=0)
+        panel = open_panel(lambda _version: io, version, rotate=90, busy_timeout=1)
+        panel.show(render_progress("Field Notes", "ExtractingPackage", 40), False)
+        assert [event for event in io.events if event[0] == "partial_reset"] == [("partial_reset", 0.001)]
+        assert [event for event in io.events if event[0] == "reset"] == [("reset", False)]
+
+
 def test_auto_falls_through_to_v1_when_newer_inits_stay_busy():
     seen = []
 

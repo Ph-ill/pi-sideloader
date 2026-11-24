@@ -15,9 +15,17 @@ from datetime import UTC, datetime, timedelta
 
 from sideload_pi.errors import LimitError
 
+# A Pi Zero has no battery-backed clock. Until NTP runs, the clock is 1970
+# (or some other pre-image date) and every profile looks expired.
+SANE_EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
+
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def clock_is_sane(now: datetime) -> bool:
+    return ensure_aware(now) >= SANE_EPOCH
 
 
 def ensure_aware(value: datetime) -> datetime:

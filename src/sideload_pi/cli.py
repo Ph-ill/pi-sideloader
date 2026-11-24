@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from sideload_pi import __version__
 from sideload_pi.config import load_config
-from sideload_pi.daemon import build, pop_code, submit_code
+from sideload_pi.daemon import build, pop_code, read_live_status, submit_code
 from sideload_pi.display.epd import DRIVERS, LgpioIO, open_panel
 from sideload_pi.display.screens import render_test_pattern, write_gallery, write_test_patterns
 from sideload_pi.errors import SideloadError
@@ -29,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("daemon")
     sub.add_parser("status")
+    sub.add_parser("enable")
     sub.add_parser("login")
     code = sub.add_parser("2fa")
     code.add_argument("digits")
@@ -82,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
             return _daemon(config)
         if args.command == "status":
             return _status(config)
+        if args.command == "enable":
+            return _enable(config)
         if args.command == "login":
             return _login(config)
         if args.command == "2fa":
@@ -116,15 +120,48 @@ def _daemon(config) -> int:
 
 
 def _status(config) -> int:
-    daemon = build(config, connect_hardware=False)
-    payload = daemon.status()
+    layout = Layout(config.root)
+    live = read_live_status(layout)
+    if live is not None:
+        payload = live
+        source = "live"
+    else:
+        daemon = build(config, connect_hardware=False)
+        payload = daemon.status()
+        source = "daemon is not running"
     if not payload["apps"]:
         print("library: empty")
     for app in payload["apps"]:
         days = "not installed" if app["days"] is None else f"{app['days']}d left"
         error = f"  error: {app['last_error']}" if app["last_error"] else ""
         print(f"{app['name']}  {app['bundle_id']}  {days}{error}")
-    print(f"phase: {payload['phase']}")
+    print(f"phase: {payload['phase']} ({source})")
+    return 0
+
+
+def _enable(config) -> int:
+    if os.geteuid() != 0:
+        raise SideloadError("Run sudo sideload-pi enable after login and the display test.")
+    layout = Layout(config.root)
+    problems = []
+    if not config.anisette_url:
+        problems.append("anisette_url is empty in the config")
+    if not layout.account.exists():
+        problems.append("no Apple ID is saved (sideload-pi login)")
+    if config.display.version == "auto" and not layout.display_version.exists():
+        problems.append("display.version is auto and display-test has not recorded a revision")
+    if problems:
+        raise SideloadError(
+            "Not starting the daemon yet:\n- " + "\n- ".join(problems)
+        )
+    subprocess.run(["/bin/systemctl", "daemon-reload"], check=False)
+    result = subprocess.run(
+        ["/bin/systemctl", "enable", "--now", "sideload-pi.service"],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SideloadError("systemctl enable --now sideload-pi.service failed")
+    print("sideload-pi.service is enabled and running.")
     return 0
 
 
@@ -135,12 +172,25 @@ def _login(config) -> int:
     if not apple_id or not password:
         raise SideloadError("Apple ID and password are required")
 
-    def code_provider(kind: str) -> str:
+    def code_provider(kind: str, phones=None) -> str:
         print(f"Apple wants a verification code ({kind}).", flush=True)
-        print("Check your trusted devices. The code is not saved.", flush=True)
+        phone_id = ""
+        if phones and len(phones) > 1:
+            print("SMS numbers:", flush=True)
+            for item in phones:
+                print(f"  {item.id}  {item.label}", flush=True)
+            phone_id = input("Phone id: ").strip()
+        elif phones:
+            phone_id = phones[0].id
+            print(f"SMS number {phones[0].id} ({phones[0].label}).", flush=True)
+        else:
+            print("Check your trusted devices. The code is not saved.", flush=True)
         entered = getpass.getpass("Code: ")
         popped = pop_code(daemon.layout)
-        return popped or entered
+        chosen = popped or entered
+        if phone_id and ":" not in chosen:
+            return f"{phone_id}:{chosen}"
+        return chosen
 
     daemon.provisioner.login(apple_id, password, code_provider, utcnow())
     print("Signed in. The password is in", daemon.layout.account)
@@ -196,6 +246,11 @@ def _refresh(config, bundle_id: str) -> int:
 
 
 def _display_test(config, driver: str | None) -> int:
+    if _service_active():
+        raise SideloadError(
+            "sideload-pi.service is running and holds the panel. "
+            "Stop it first: sudo systemctl stop sideload-pi"
+        )
     version = driver or config.display.version
     if version == "auto":
         raise SideloadError(

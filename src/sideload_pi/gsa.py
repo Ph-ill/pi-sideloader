@@ -19,8 +19,14 @@ and the pure-Python client in nythepegasus/grandslam:
   code is submitted and the whole login runs once more, which is what AltSign
   does after a successful code.
 
-This was checked against a local SRP peer and fixture plists. It was not run
-against Apple's servers in this repo's tests.
+Since 12 October 2026 the HTTP identity has to match the anisette client
+(AltSign#61). User-Agent and X-MMe-Client-Info come from that payload, the
+``cpd`` dictionary is the string-only shape, and ``hsc`` 434 retries init
+once with the same A2k after the anisette server resynchronizes. ``hsc`` 409
+with no ``au`` means Apple already sent the trusted-device code.
+
+This was checked against frozen known-answer vectors and a local SRP peer.
+It was not run against Apple's servers in this repo's tests.
 """
 
 from __future__ import annotations
@@ -28,6 +34,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import inspect
+import json
 import plistlib
 import struct
 from dataclasses import dataclass
@@ -47,6 +55,9 @@ srp.no_username_in_x()
 
 GSA_URL = "https://gsa.apple.com/grandslam/GsService2"
 XCODE_APP = "com.apple.gs.xcode.auth"
+# The Xcode version AltSign#61 sent on the sign-in that Apple accepted after
+# 14 October 2026. The developer-services client keeps its own configured string.
+GSA_XCODE_VERSION = "27.0 (27A5218g)"
 
 _ERROR_TEXT = {
     -20101: "Apple ID or password was not accepted",
@@ -61,6 +72,12 @@ class AppleSession:
     adsid: str
     gs_token: str
     token_expiry: datetime | None
+
+
+@dataclass(frozen=True)
+class SmsNumber:
+    id: str
+    label: str
 
 
 def derive_password(password: str, salt: bytes, iterations: int, protocol: str) -> bytes:
@@ -177,14 +194,20 @@ class GsaClient:
         anisette_fetch,
         code_provider,
         *,
+        anisette_resync=None,
         _depth: int = 0,
     ) -> AppleSession:
+        # AltSign: authentication only works with a lowercased Apple ID.
+        apple_id = apple_id.strip().lower()
         anisette = anisette_fetch()
         user = srp.User(apple_id, b"", hash_alg=srp.SHA256, ng_type=srp.NG_2048)
         _, public_a = user.start_authentication()
-        first = self._gsa(
+        anisette, first = self._init(
             anisette,
-            {"A2k": public_a, "ps": ["s2k", "s2k_fo"], "u": apple_id, "o": "init"},
+            public_a,
+            apple_id,
+            anisette_fetch,
+            anisette_resync,
         )
         protocol = str(first.get("sp") or "")
         salt = first.get("s")
@@ -199,8 +222,9 @@ class GsaClient:
         m1 = user.process_challenge(salt, server_b)
         if m1 is None:
             raise AppleAuthError("The SRP challenge failed before the password could be checked")
+        # Same anisette as the init that Apple accepted, including a 434 retry.
         second = self._gsa(
-            anisette_fetch(),
+            anisette,
             {"c": cookie, "M1": m1, "u": apple_id, "o": "complete"},
         )
         m2 = second.get("M2")
@@ -222,15 +246,34 @@ class GsaClient:
         idms = spd.get("GsIdmsToken")
         if not isinstance(adsid, str) or not isinstance(idms, str):
             raise AppleAuthError("Apple's session did not include an account id")
-        auth_kind = str((second.get("Status") or {}).get("au") or "")
+        status = second.get("Status") or {}
+        auth_kind = str(status.get("au") or "")
+        already_sent = False
+        # Since October 2026 Apple often pushes the code itself, then answers
+        # hsc 409 with no au instead of trustedDeviceSecondaryAuth.
+        if not auth_kind and _as_int(status.get("hsc")) == 409:
+            auth_kind = "trustedDeviceSecondaryAuth"
+            already_sent = True
         if auth_kind in {"trustedDeviceSecondaryAuth", "secondaryAuth"}:
             if _depth >= 1:
                 raise AppleAuthError(
                     "Apple asked for a verification code again after it was accepted"
                 )
-            self._second_factor(auth_kind, adsid, idms, anisette_fetch, code_provider)
+            self._second_factor(
+                auth_kind,
+                adsid,
+                idms,
+                anisette_fetch,
+                code_provider,
+                already_sent=already_sent,
+            )
             return self.authenticate(
-                apple_id, password, anisette_fetch, code_provider, _depth=_depth + 1
+                apple_id,
+                password,
+                anisette_fetch,
+                code_provider,
+                anisette_resync=anisette_resync,
+                _depth=_depth + 1,
             )
         sk = spd.get("sk")
         token_cookie = spd.get("c")
@@ -275,33 +318,61 @@ class GsaClient:
             expiry = datetime.fromtimestamp(raw_expiry / 1000, tz=UTC)
         return AppleSession(adsid=adsid, gs_token=token, token_expiry=expiry)
 
-    def _second_factor(self, kind, adsid, idms, anisette_fetch, code_provider) -> None:
+    def _init(self, anisette, public_a, apple_id, anisette_fetch, anisette_resync, *, retried=False):
+        first = self._gsa(
+            anisette,
+            {"A2k": public_a, "ps": ["s2k", "s2k_fo"], "u": apple_id, "o": "init"},
+        )
+        status = first.get("Status") or {}
+        if _as_int(status.get("hsc")) != 434:
+            return anisette, first
+        if retried or anisette_resync is None:
+            raise AppleAuthError(
+                "Apple asked the anisette server to resynchronize (hsc 434) and it did not recover"
+            )
+        sim = status.get("X-Apple-I-MD-DATA")
+        if isinstance(sim, bytes):
+            sim = base64.b64encode(sim).decode("ascii")
+        if not isinstance(sim, str) or not sim.strip():
+            raise AppleAuthError("Apple asked for an anisette resync but sent no X-Apple-I-MD-DATA")
+        anisette_resync(sim.strip())
+        # Same SRP private value and A2k. Only the anisette identity changes.
+        return self._init(
+            anisette_fetch(),
+            public_a,
+            apple_id,
+            anisette_fetch,
+            anisette_resync,
+            retried=True,
+        )
+
+    def _second_factor(
+        self, kind, adsid, idms, anisette_fetch, code_provider, *, already_sent: bool
+    ) -> None:
         anisette = anisette_fetch()
         identity = base64.b64encode(f"{adsid}:{idms}".encode()).decode("ascii")
         headers = {
-            "Content-Type": "text/x-xml-plist",
-            "User-Agent": "Xcode",
-            "Accept": "text/x-xml-plist",
+            **self._identity_headers(anisette),
             "Accept-Language": "en-us",
-            "X-Apple-App-Info": "com.apple.gs.xcode.auth",
-            "X-Xcode-Version": self.xcode_version,
             "X-Apple-Identity-Token": identity,
             **anisette.http_headers(),
         }
         if kind == "secondaryAuth":
             self._sms_code(headers, code_provider)
             return
-        triggered = self.http.request(
-            "GET",
-            "https://gsa.apple.com/auth/verify/trusteddevice",
-            headers=headers,
-            timeout=self.timeout,
-        )
-        if triggered.status >= 400:
-            raise AppleAuthError(
-                f"Apple did not send a trusted-device code (HTTP {triggered.status})"
+        if not already_sent:
+            triggered = self.http.request(
+                "GET",
+                "https://gsa.apple.com/auth/verify/trusteddevice",
+                headers=headers,
+                timeout=self.timeout,
+                follow_redirects=False,
             )
-        code = str(code_provider("trusted_device")).strip().replace(" ", "")
+            if triggered.status >= 400:
+                raise AppleAuthError(
+                    f"Apple did not send a trusted-device code (HTTP {triggered.status})"
+                )
+        code = _digits(_request_code(code_provider, "trusted_device", None))
         headers = dict(headers)
         headers["security-code"] = code
         checked = self.http.request(
@@ -309,31 +380,76 @@ class GsaClient:
             "https://gsa.apple.com/grandslam/GsService2/validate",
             headers=headers,
             timeout=self.timeout,
+            follow_redirects=False,
         )
+        if checked.status >= 400:
+            raise AppleAuthError(f"Apple rejected the verification code (HTTP {checked.status})")
         self._raise_factor_error(checked.body)
 
     def _sms_code(self, headers, code_provider) -> None:
-        body = json_bytes({"phoneNumber": {"id": 1}, "mode": "sms"})
+        phones = self._phone_numbers(headers)
+        if not phones:
+            phones = [SmsNumber("1", "the number on the Apple ID")]
+        entered = str(_request_code(code_provider, "sms", phones)).strip()
+        phone_id, code = _split_sms(entered, phones)
+        body = json_bytes({"phoneNumber": {"id": int(phone_id)}, "mode": "sms"})
         sent = self.http.request(
             "PUT",
             "https://gsa.apple.com/auth/verify/phone/",
             body=body,
-            headers={**headers, "Content-Type": "application/json"},
+            headers={**headers, "Content-Type": "application/json", "Accept": "application/json"},
             timeout=self.timeout,
+            follow_redirects=False,
         )
         if sent.status >= 400:
             raise AppleAuthError(f"Apple did not send an SMS code (HTTP {sent.status})")
-        code = str(code_provider("sms")).strip().replace(" ", "")
-        payload = {"phoneNumber": {"id": 1}, "mode": "sms", "securityCode": {"code": code}}
+        payload = {
+            "phoneNumber": {"id": int(phone_id)},
+            "mode": "sms",
+            "securityCode": {"code": code},
+        }
         checked = self.http.request(
             "POST",
             "https://gsa.apple.com/auth/verify/phone/securitycode",
             body=json_bytes(payload),
-            headers={**headers, "Content-Type": "application/json"},
+            headers={**headers, "Content-Type": "application/json", "Accept": "application/json"},
             timeout=self.timeout,
+            follow_redirects=False,
         )
         if checked.status >= 400:
             raise AppleAuthError("Apple rejected the SMS verification code")
+
+    def _phone_numbers(self, headers) -> list[SmsNumber]:
+        """GET https://gsa.apple.com/auth returns trustedPhoneNumbers.
+
+        apple-private-apis reads id, numberWithDialCode, lastTwoDigits, and
+        pushMode from that JSON. The label we keep is the last two digits so
+        a log line is not a full phone number.
+        """
+        response = self.http.request(
+            "GET",
+            "https://gsa.apple.com/auth",
+            headers={**headers, "Accept": "application/json"},
+            timeout=self.timeout,
+            follow_redirects=False,
+        )
+        if response.status >= 400 or not response.body:
+            return []
+        try:
+            payload = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return []
+        found = []
+        for item in payload.get("trustedPhoneNumbers") or []:
+            if not isinstance(item, dict) or item.get("id") is None:
+                continue
+            push = str(item.get("pushMode") or "sms")
+            if push != "sms":
+                continue
+            last = str(item.get("lastTwoDigits") or "").strip()
+            label = f"ending {last}" if last else "on file"
+            found.append(SmsNumber(str(item["id"]), label))
+        return found
 
     def _raise_factor_error(self, body: bytes) -> None:
         try:
@@ -349,6 +465,23 @@ class GsaClient:
             message = _ERROR_TEXT.get(code_int, str(data.get("em") or "verification failed"))
             raise AppleAuthError(f"{message} ({code_int})", code_int)
 
+    def _identity_headers(self, anisette: AnisetteData) -> dict[str, str]:
+        if not anisette.user_agent or not anisette.client_info:
+            raise AppleAuthError(
+                "Anisette data has no user_agent and client_info pair. "
+                "Fetch /v3/client_info and send both on every GSA request. "
+                "A hardcoded akd User-Agent is rejected with -80045."
+            )
+        return {
+            "Content-Type": "text/x-xml-plist",
+            "Accept": "text/x-xml-plist",
+            "User-Agent": anisette.user_agent,
+            "X-MMe-Client-Info": anisette.client_info,
+            "X-Xcode-Version": GSA_XCODE_VERSION,
+            "X-Apple-App-Info": XCODE_APP,
+            "Connection": "close",
+        }
+
     def _gsa(self, anisette: AnisetteData, parameters: dict) -> dict:
         request = {"cpd": anisette.cpd()}
         request.update(parameters)
@@ -360,15 +493,11 @@ class GsaClient:
             "POST",
             GSA_URL,
             body=body,
-            headers={
-                "Content-Type": "text/x-xml-plist",
-                "Accept": "*/*",
-                "User-Agent": "akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
-                "X-MMe-Client-Info": anisette.client_info,
-            },
+            headers=self._identity_headers(anisette),
             timeout=self.timeout,
+            follow_redirects=False,
         )
-        if response.status >= 400:
+        if response.status < 200 or response.status >= 300:
             raise AppleAuthError(f"Apple login returned HTTP {response.status}")
         try:
             payload = _loads_plist(response.body)
@@ -378,20 +507,67 @@ class GsaClient:
         if not isinstance(inner, dict):
             raise AppleAuthError("Apple login response had no Response dictionary")
         status = inner.get("Status") or {}
-        code = status.get("ec", 0)
-        try:
-            code_int = int(code)
-        except (TypeError, ValueError):
-            code_int = 0
+        # 434 is returned even when ec is non-zero. The caller resynchronizes.
+        if _as_int(status.get("hsc")) == 434:
+            return inner
+        code_int = _as_int(status.get("ec"))
         if code_int != 0:
             text = _ERROR_TEXT.get(code_int) or str(status.get("em") or "Apple login failed")
             raise AppleAuthError(f"{text} ({code_int})", code_int)
         return inner
 
 
-def json_bytes(payload: dict) -> bytes:
-    import json
+def _as_int(value: object) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
 
+
+def _request_code(code_provider, kind: str, phones: list[SmsNumber] | None):
+    try:
+        count = len(inspect.signature(code_provider).parameters)
+    except (TypeError, ValueError):
+        count = 1
+    if count >= 2:
+        return code_provider(kind, phones)
+    return code_provider(kind)
+
+
+def _digits(value: str) -> str:
+    cleaned = str(value).strip().replace(" ", "")
+    if ":" in cleaned:
+        cleaned = cleaned.split(":", 1)[1]
+    if not (len(cleaned) == 6 and cleaned.isdigit()):
+        raise AppleAuthError("The verification code must be 6 digits")
+    return cleaned
+
+
+def _split_sms(entered: str, phones: list[SmsNumber]) -> tuple[str, str]:
+    text = entered.strip()
+    phone_id = None
+    code = text
+    if ":" in text:
+        phone_id, code = text.split(":", 1)
+        phone_id = phone_id.strip()
+    code = code.replace(" ", "")
+    if not (len(code) == 6 and code.isdigit()):
+        raise AppleAuthError("The verification code must be 6 digits")
+    known = {item.id for item in phones}
+    if phone_id is None:
+        if len(phones) != 1:
+            choices = ", ".join(f"{item.id} ({item.label})" for item in phones)
+            raise AppleAuthError(
+                "This Apple ID has more than one SMS number. "
+                f"Submit the code as id:123456. Choices: {choices}"
+            )
+        phone_id = phones[0].id
+    if phone_id not in known:
+        raise AppleAuthError(f"Phone id {phone_id} is not one Apple offered")
+    return phone_id, code
+
+
+def json_bytes(payload: dict) -> bytes:
     return json.dumps(payload).encode("utf-8")
 
 

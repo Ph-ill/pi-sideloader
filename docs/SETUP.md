@@ -82,9 +82,15 @@ cd pi-sideloader
 sudo scripts/install.sh
 ```
 
-The script is safe to run again. It enables I2C and SPI in `/boot/firmware/config.txt` (or `/boot/config.txt` on older images), installs `usbmuxd`, `libimobiledevice-utils`, and `ideviceinstaller` from apt, builds [zsign](https://github.com/zhlynn/zsign) with `g++ -j1` if it is not already on the path, and copies this package to `/opt/sideload-pi`. Python's cryptography and Pillow come from apt (`python3-cryptography`, `python3-pil`). Do not pip-install those on a Zero: cryptography wants a Rust compiler and the board will run out of memory. The only pip package is the pure-Python `srp` module, and only if apt did not already provide it.
+The script is safe to run again. It enables I2C and SPI in `/boot/firmware/config.txt` (or `/boot/config.txt` on older images), builds `libplist`, `libimobiledevice-glue`, `libusbmuxd`, `libimobiledevice`, `usbmuxd`, and `ideviceinstaller` from the commits pinned in `scripts/install.sh`, and builds [zsign](https://github.com/zhlynn/zsign) at the commit of pull request 391 (`make -C build/linux -j1`). Bookworm's apt copies are not used: `libimobiledevice` 1.3.0 is too old for iOS 17, and `ideviceinstaller` 1.1.1 has no `list --xml`. It also installs `avahi-daemon` so a later Wi-Fi lookup can resolve the phone. A temporary swap file is added only while those compiles run, and only if the Pi has no swap yet.
 
-It writes `/etc/sideload-pi/config.json` **only if that file does not exist**, creates `/var/lib/sideload-pi` mode 0700, and generates `secrets/web.token` mode 0600 if it is missing. Re-running the installer does not rotate that token and does not wipe an Apple ID you have already saved.
+It does **not** start `sideload-pi.service`. The panel test, `anisette_url`, and `sideload-pi login` come first. `sudo sideload-pi enable` is the step that starts the daemon.
+
+Python's cryptography and Pillow come from apt (`python3-cryptography`, `python3-pil`). Do not pip-install those on a Zero: cryptography wants a Rust compiler and the board will run out of memory. The only pip package is the pure-Python `srp` module, and only if apt did not already provide it.
+
+The daemon runs as the system user `sideload` (groups `gpio`, `spi`, `i2c`, and `plugdev` when those groups exist). `sudo sideload-pi` drops to that user for every command except `enable`, so the Apple ID file stays readable by the service. Installing packages, udev rules, and `systemctl enable` still need root. Low-battery shutdown is the only thing the service does as root, via a sudoers rule that allows `systemctl poweroff` and nothing else. GPIO, SPI, and the usbmuxd socket are what the groups are for; if a group is missing on your image, say so in the install log and the drop-in omits it.
+
+It writes `/etc/sideload-pi/config.json` **only if that file does not exist**, creates `/var/lib/sideload-pi` mode 0700 owned by `sideload`, and generates `secrets/web.token` mode 0600 if it is missing. Re-running the installer does not rotate that token and does not wipe an Apple ID you have already saved.
 
 Reboot once so SPI and I2C come up:
 
@@ -117,9 +123,10 @@ There is no version register to read. `display.version` may be `V1`, `V2`, `V3`,
 
 `auto` tries V4, then V3, then V2, and only then V1. The newer inits wait for the BUSY pin, so a stuck panel fails that guess. The V1 init sequence **never reads BUSY**, so a V1 guess cannot fail. If your HAT might be V1, do not leave the setting on `auto`. Set it after the test below.
 
-On the Pi, with the HAT stacked and SPI enabled:
+On the Pi, with the HAT stacked and SPI enabled. If the daemon is already running it holds the panel, and `display-test` refuses until you stop it:
 
 ```sh
+sudo systemctl stop sideload-pi
 sudo sideload-pi display-test V1
 ```
 
@@ -152,7 +159,11 @@ Apple's login needs a short-lived device identity called anisette. The library t
 
 Run [Dadoum's anisette-v3-server](https://github.com/Dadoum/anisette-v3-server) on a machine that can (a Linux box, a newer Pi, a small VPS). Give it a **persistent disk**. A fresh identity on every boot makes Apple ask for a verification code every time. Do not point this Pi at a public anisette server: you would share an identity with strangers, and Apple locks those.
 
-`GET /` on that server returns the header JSON this client already understands. Put the URL in the config. A Tailscale address is a good choice, so the Pi can reach it from a cafe without opening a port:
+The client reads `GET /v3/client_info` for the `user_agent` and `client_info` pair, and `GET /` for the one-time password. Since 12 October 2026 Apple rejects a login (`-80045`) when those two headers do not match the program that produced the anisette data. Do not point this at a server that only speaks the old header set.
+
+If Apple answers `hsc` 434, the client asks the server to resynchronize (`POST /v3/resync`, then `GET /reprovision`) and retries the login once with the same SRP public key. Dadoum's current `anisette-v3-server` has neither route. Restart that server so it re-provisions, then sign in again. Provision's older server accepts `GET /reprovision` when remote reprovisioning is turned on.
+
+Put the URL in the config. A Tailscale address is a good choice, so the Pi can reach it from a cafe without opening a port:
 
 ```json
 "anisette_url": "http://100.x.y.z:6969"

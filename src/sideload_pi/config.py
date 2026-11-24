@@ -51,7 +51,7 @@ class WebConfig:
     enabled: bool = True
     bind: str = "127.0.0.1"
     port: int = 8741
-    max_upload_mb: int = 200
+    max_upload_mb: int = 64
     allow_remote: bool = False
 
 

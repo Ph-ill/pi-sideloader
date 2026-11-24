@@ -127,6 +127,7 @@ def test_refresh_installs_and_then_backs_off(tmp_path):
 
     daemon.provisioner.error = SideloadError("profile rejected")
     daemon.library.apps["com.example.notes"].expiry = NOW
+    daemon.library.save()
     daemon.tick(NOW)
     assert daemon.phase == "error"
     assert daemon.library.apps["com.example.notes"].attempts == 1
@@ -169,6 +170,38 @@ def test_force_file_ignores_backoff(tmp_path):
     write_secret_text(daemon.layout.force, "com.example.notes\n")
     daemon.tick(NOW)
     assert daemon.phase == "success"
+
+
+def test_unsynced_clock_does_not_decide_a_refresh(tmp_path):
+    phone = Phone("UDID", "Pocket", "usb")
+    provisioner = _Provisioner(NOW + timedelta(days=7))
+    daemon = _daemon(tmp_path, phone=phone, provisioner=provisioner, expiry=None)
+    daemon.tick(datetime(2020, 1, 1, tzinfo=UTC))
+    assert daemon.phase == "waiting_for_clock"
+    assert provisioner.calls == []
+
+
+def test_a_cli_add_survives_the_daemons_next_save(tmp_path):
+    from tests.support import make_ipa
+
+    daemon = _daemon(tmp_path, phone=None)
+    daemon.library.save()
+    other = Library(daemon.layout)
+    other.load()
+    ipa = make_ipa(tmp_path / "extra.ipa", bundle="com.example.extra", name="Extra")
+    other.add_ipa(
+        ipa,
+        max_apps=3,
+        strip_extensions=True,
+        now=NOW,
+        window=timedelta(days=7),
+        app_id_limit=10,
+    )
+    daemon.library.mark_success("com.example.notes", NOW + timedelta(days=7), NOW)
+    saved = Library(daemon.layout)
+    saved.load()
+    assert "com.example.extra" in saved.apps
+    assert saved.apps["com.example.notes"].expiry == NOW + timedelta(days=7)
 
 
 def test_usb_power_note_is_logged_once(tmp_path, caplog):

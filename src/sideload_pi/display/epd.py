@@ -74,6 +74,10 @@ class RecordingIO:
     def reset(self, slow: bool = False) -> None:
         self.events.append(("reset", slow))
 
+    def partial_reset(self) -> None:
+        # Waveshare displayPartial: RST low for 1 ms, then high. Not reset().
+        self.events.append(("partial_reset", 0.001))
+
     def command(self, command: int, data: bytes = b"") -> None:
         self.events.append((command, bytes(data)))
 
@@ -114,6 +118,12 @@ class LgpioIO:
         time.sleep(low)
         self.lgpio.gpio_write(self.handle, self.rst, 1)
         time.sleep(high)
+
+    def partial_reset(self) -> None:
+        # epd2in13_V3/V4 displayPartial. The full reset() pulse garbles a partial.
+        self.lgpio.gpio_write(self.handle, self.rst, 0)
+        time.sleep(0.001)
+        self.lgpio.gpio_write(self.handle, self.rst, 1)
 
     def command(self, command: int, data: bytes = b"") -> None:
         self.lgpio.gpio_write(self.handle, self.dc, 0)
@@ -340,7 +350,7 @@ class Panel:
 
     def _show_v4(self, buf: bytes, full: bool) -> None:
         if not full:
-            self.io.reset(False)
+            self.io.partial_reset()
             self.io.command(0x3C, bytes([0x80]))
             self.io.command(0x01, bytes([0xF9, 0x00, 0x00]))
             self.io.command(0x11, bytes([0x03]))
@@ -355,7 +365,7 @@ class Panel:
 
     def _show_v3(self, buf: bytes, full: bool) -> None:
         if not full:
-            self.io.reset(False)
+            self.io.partial_reset()
             self._lut_v3(V3_LUT_PARTIAL)
             self.io.command(0x37, bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00]))
             self.io.command(0x3C, bytes([0x80]))

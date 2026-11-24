@@ -14,6 +14,25 @@ class HttpResponse:
     headers: dict[str, str]
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """GrandSlam answers a rejected client with a redirect to an HTML page.
+
+    Following it turns that rejection into a plist parse error. AltSign's
+    October 2026 session delegate refuses the redirect instead.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+    http_error_301 = http_error_302
+    http_error_303 = http_error_302
+    http_error_307 = http_error_302
+    http_error_308 = http_error_302
+
+
 class UrllibHttp:
     def request(
         self,
@@ -23,10 +42,16 @@ class UrllibHttp:
         body: bytes | None = None,
         headers: dict[str, str] | None = None,
         timeout: float = 60,
+        follow_redirects: bool = True,
     ) -> HttpResponse:
         req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as response:
+            if follow_redirects:
+                response_cm = urllib.request.urlopen(req, timeout=timeout)
+            else:
+                opener = urllib.request.build_opener(_RefuseRedirects)
+                response_cm = opener.open(req, timeout=timeout)
+            with response_cm as response:
                 return HttpResponse(
                     status=response.status,
                     body=response.read(),

@@ -1,3 +1,4 @@
+import pytest
 from tests.support import make_ipa
 
 from sideload_pi.config import Config
@@ -74,3 +75,33 @@ def test_multipart_and_token_cookie(tmp_path):
 
     assert pop_code(layout) == "123456"
     assert app.daemon.refreshed == [""]
+
+
+def test_upload_streams_to_disk_in_chunks(tmp_path):
+    from sideload_pi.web import stream_multipart_file
+
+    ipa = make_ipa(tmp_path / "notes.ipa")
+    raw = ipa.read_bytes()
+    body = (
+        b'--BOUND\r\nContent-Disposition: form-data; name="ipa"; filename="notes.ipa"\r\n\r\n'
+        + raw
+        + b"\r\n--BOUND--\r\n"
+    )
+    offset = {"n": 0}
+
+    def read(size):
+        start = offset["n"]
+        chunk = body[start : start + 7]
+        offset["n"] = start + len(chunk)
+        return chunk
+
+    dest = tmp_path / "out.ipa"
+    name = stream_multipart_file(read, "multipart/form-data; boundary=BOUND", dest, limit=len(raw))
+    assert name == "notes.ipa"
+    assert dest.read_bytes() == raw
+    offset["n"] = 0
+    with pytest.raises(Exception, match="too large"):
+        stream_multipart_file(
+            read, "multipart/form-data; boundary=BOUND", tmp_path / "big.ipa", limit=8
+        )
+    assert not (tmp_path / "big.ipa").exists()

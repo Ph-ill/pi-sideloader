@@ -74,12 +74,23 @@ def test_fourth_app_is_refused_and_extensions_count_when_kept():
         new_app_ids=1,
         app_ids_remaining=0,
     )
+    # Two apps already in the library, plus the one being added, plus one
+    # extension, is 4 and does not fit in 3. Passing only "1" for the new app
+    # would hide that.
     with pytest.raises(LimitError):
         assert_extension_budget(
-            ["a.b.widget", "a.b.share", "a.b.intent"],
+            ["com.example.notes.widget"],
             strip=False,
-            apps_after_add=1,
+            apps_after_add=3,
             max_apps=3,
-            new_app_ids=4,
+            new_app_ids=2,
             app_ids_remaining=10,
         )
+    assert_extension_budget(
+        ["com.example.notes.widget"],
+        strip=False,
+        apps_after_add=1,
+        max_apps=3,
+        new_app_ids=2,
+        app_ids_remaining=10,
+    )

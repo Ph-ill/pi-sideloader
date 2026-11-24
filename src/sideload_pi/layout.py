@@ -64,6 +64,14 @@ class Layout:
         return self.runtime / "daemon.lock"
 
     @property
+    def status_path(self) -> Path:
+        return self.runtime / "status.json"
+
+    @property
+    def cert_meta(self) -> Path:
+        return self.secrets / "development.json"
+
+    @property
     def display_version(self) -> Path:
         return self.root / "display-version"
 

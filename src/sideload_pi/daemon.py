@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -30,6 +32,8 @@ from sideload_pi.process import run_command
 from sideload_pi.progress import ProgressEvent
 from sideload_pi.provisioner import Provisioner
 from sideload_pi.scheduling import (
+    clock_is_sane,
+    format_time,
     refresh_due,
     retry_delay_seconds,
     retry_ready,
@@ -43,27 +47,64 @@ from sideload_pi.usb_power import note_phone_on_usb
 log = logging.getLogger("sideload_pi")
 
 
-def submit_code(layout: Layout, code: str) -> None:
+def submit_code(layout: Layout, code: str, phone_id: str = "") -> None:
     cleaned = code.strip().replace(" ", "")
-    if not (len(cleaned) == 6 and cleaned.isdigit()):
+    prefix = phone_id.strip()
+    if prefix:
+        if not prefix.isdigit():
+            raise SideloadError("The phone id must be a number")
+        body = f"{prefix}:{cleaned}"
+        digits = cleaned
+    elif ":" in cleaned:
+        prefix, digits = cleaned.split(":", 1)
+        if not prefix.isdigit():
+            raise SideloadError("The phone id must be a number")
+        body = f"{prefix}:{digits}"
+    else:
+        digits = cleaned
+        body = cleaned
+    if not (len(digits) == 6 and digits.isdigit()):
         raise SideloadError("The verification code must be 6 digits")
     layout.ensure()
-    write_secret_text(layout.two_fa, cleaned + "\n")
+    write_secret_text(layout.two_fa, body + "\n")
 
 
 def pop_code(layout: Layout) -> str | None:
     path = layout.two_fa
     if not path.exists():
         return None
-    text = path.read_text(encoding="utf-8").strip().replace(" ", "")
+    text = path.read_text(encoding="utf-8").strip()
     path.unlink(missing_ok=True)
-    if len(text) == 6 and text.isdigit():
+    digits = text.split(":", 1)[-1].replace(" ", "")
+    if len(digits) == 6 and digits.isdigit():
         return text
     return None
 
 
 def power_off() -> None:
-    subprocess.run(["/bin/systemctl", "poweroff"], check=False)
+    command = ["/bin/systemctl", "poweroff"]
+    if os.geteuid() != 0:
+        command = ["/usr/bin/sudo", "-n", *command]
+    subprocess.run(command, check=False)
+
+
+def read_live_status(layout: Layout) -> dict | None:
+    """Status written by the running daemon. A dead pid is ignored."""
+    path = layout.status_path
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    pid = data.get("pid")
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, TypeError, ValueError):
+        return None
+    return data
 
 
 class Daemon:
@@ -112,6 +153,8 @@ class Daemon:
         self._last_percent: int | None = None
         self._last_paint: datetime | None = None
         self.halted = False
+        self._state_mtime: int | None = None
+        self.sms_phones: list[dict] = []
         reported = getattr(panel, "version", None) or config.display.version
         self.partial_refresh = partial_refresh_enabled(reported, config.display.allow_partial)
 
@@ -154,6 +197,14 @@ class Daemon:
             return
         self._check_battery(now)
         if self.halted:
+            return
+        self._reload_library()
+        if not clock_is_sane(now):
+            self._set(
+                "waiting_for_clock",
+                "Clock is not synced. Waiting for time-sync before any refresh.",
+            )
+            self._paint(now)
             return
         self.phone = self.devices.current() if self.devices else None
         if self.phone is not None and self.phone.via == "usb":
@@ -201,11 +252,20 @@ class Daemon:
                 "battery_percent": self.hud_battery,
                 "charging": self.hud_charging,
                 "apps": apps,
+                "sms_phones": list(self.sms_phones),
             }
 
-    def wait_for_code(self, kind: str) -> str:
+    def wait_for_code(self, kind: str, phones=None) -> str:
+        self.sms_phones = [
+            {"id": item.id, "label": item.label} for item in (phones or [])
+        ]
+        if self.sms_phones:
+            choices = ", ".join(f"{item['id']} ({item['label']})" for item in self.sms_phones)
+            message = f"SMS code. Reply id:123456. {choices}"
+        else:
+            message = "Enter the 6-digit Apple verification code"
         log.info("waiting for an Apple verification code (%s)", kind)
-        self._set("needs_2fa", "Enter the 6-digit Apple verification code")
+        self._set("needs_2fa", message)
         self._paint(utcnow())
         deadline = time.monotonic() + self.config.two_fa_timeout_seconds
         while time.monotonic() < deadline:
@@ -372,9 +432,34 @@ class Daemon:
             self.stopped = True
             self.shutdown()
 
+    def _reload_library(self) -> None:
+        path = self.layout.state_path
+        try:
+            current = path.stat().st_mtime_ns if path.exists() else None
+        except OSError:
+            current = None
+        if current is None or current == self._state_mtime:
+            return
+        try:
+            self.library.load()
+        except Exception:
+            log.exception("could not reload the library; keeping the in-memory copy")
+            return
+        self._state_mtime = current
+
     def _set(self, phase: str, message: str) -> None:
         self.phase = phase
         self.message = message
+        self._publish()
+
+    def _publish(self) -> None:
+        try:
+            payload = self.status()
+            payload["pid"] = os.getpid()
+            payload["updated_at"] = format_time(utcnow())
+            write_secret_text(self.layout.status_path, json.dumps(payload, indent=2) + "\n")
+        except Exception:
+            log.exception("could not write the live status file")
 
     def _paint(self, now: datetime) -> None:
         image = self._image(now)

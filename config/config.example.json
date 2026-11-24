@@ -25,7 +25,7 @@
     "enabled": true,
     "bind": "127.0.0.1",
     "port": 8741,
-    "max_upload_mb": 200,
+    "max_upload_mb": 64,
     "allow_remote": false
   },
   "display": {

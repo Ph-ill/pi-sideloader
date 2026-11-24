@@ -1,16 +1,22 @@
-"""Fetch anisette headers from a remote anisette-v3-server (its v1 GET /).
+"""Fetch anisette headers from a remote anisette-v3-server.
 
 Apple's ADI library ships as armeabi-v7a, arm64, and x86. A Pi Zero (ARMv6)
 cannot run it, so this device calls a server the owner runs elsewhere.
-Dadoum's anisette-v3-server answers GET / with the header set AltServer-Linux
-already consumes. Keep that server's identity on disk. A new identity on every
-boot makes Apple ask for a verification code every time.
+Keep that server's identity on disk. A new identity on every boot makes Apple
+ask for a verification code every time.
+
+Since 12 October 2026, GsService2 init fails with -80045 unless the User-Agent
+and X-MMe-Client-Info are the pair from the client that produced the anisette
+data (AltSign#61, AltStore#1828). Dadoum's anisette-v3-server publishes that
+pair at GET /v3/client_info. GET / still returns X-MMe-Client-Info from the
+v1 device description, which is a different string, so it is not used for the
+identity. The one-time password still comes from GET /.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from sideload_pi.errors import AnisetteError
@@ -29,12 +35,6 @@ _ALIASES = {
     "client_time": ("X-Apple-I-Client-Time", "date"),
 }
 
-_DEFAULT_CLIENT = (
-    "<iMac11,3> <Mac OS X;10.15.6;19G2021> "
-    "<com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>"
-)
-
-
 @dataclass(frozen=True)
 class AnisetteData:
     md: str
@@ -47,6 +47,8 @@ class AnisetteData:
     locale: str
     timezone: str
     client_time: str
+    # From GET /v3/client_info. Empty only for fixtures that never talk to GSA.
+    user_agent: str = ""
 
     def http_headers(self) -> dict[str, str]:
         return {
@@ -63,17 +65,22 @@ class AnisetteData:
         }
 
     def cpd(self) -> dict:
-        headers = self.http_headers()
-        if self.rinfo.isdigit():
-            headers["X-Apple-I-MD-RINFO"] = int(self.rinfo)  # type: ignore[assignment]
+        """String-only client dictionary from AltSign#61.
+
+        Booleans and the extra anisette headers (RINFO included) are rejected
+        together with a mismatched User-Agent. ``loc`` is the literal en_US
+        that function sends, not the anisette locale header.
+        """
         return {
-            "bootstrap": True,
-            "icscrec": True,
-            "pbe": False,
-            "prkgen": True,
+            "bootstrap": "true",
+            "icscrec": "true",
+            "pbe": "false",
+            "prkgen": "true",
             "svct": "iCloud",
-            "loc": self.locale,
-            **headers,
+            "loc": "en_US",
+            "X-Apple-I-MD": self.md,
+            "X-Apple-I-MD-M": self.md_m,
+            "X-Mme-Device-Id": self.device_id,
         }
 
 
@@ -101,7 +108,7 @@ def parse_anisette(payload: dict, *, now: datetime | None = None) -> AnisetteDat
         rinfo=_pick(payload, _ALIASES["rinfo"]) or "17106176",
         device_id=device_id,
         serial=_pick(payload, _ALIASES["serial"]) or "0",
-        client_info=_pick(payload, _ALIASES["client_info"]) or _DEFAULT_CLIENT,
+        client_info=_pick(payload, _ALIASES["client_info"]),
         locale=_pick(payload, _ALIASES["locale"]) or "en_US",
         timezone=_pick(payload, _ALIASES["timezone"]) or "UTC",
         client_time=_pick(payload, _ALIASES["client_time"]) or moment.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -133,11 +140,62 @@ class AnisetteClient:
                 "data locally because Apple's ADI library has no ARMv6 build. Set "
                 "anisette_url to an anisette-v3-server you run, then try again."
             )
-        response = self.http.request("GET", self.url + "/", timeout=self.timeout)
+        identity = self._get_json(self.url + "/v3/client_info")
+        client_info = str(identity.get("client_info") or "")
+        user_agent = str(identity.get("user_agent") or "")
+        if not client_info or not user_agent:
+            raise AnisetteError(
+                "anisette /v3/client_info did not include client_info and user_agent. "
+                "Since 12 October 2026 Apple rejects GsService2 unless both match the "
+                "client that produced the anisette data."
+            )
+        payload = self._get_json(self.url + "/")
+        data = parse_anisette(payload, now=now)
+        # The v1 body still carries X-MMe-Client-Info, and it is not the v3 pair.
+        return replace(data, client_info=client_info, user_agent=user_agent)
+
+    def resync(self, md_data: str) -> None:
+        """Ask the anisette server to resynchronize after Apple's hsc 434.
+
+        anisette-v3-server's app.d has no route that accepts X-Apple-I-MD-DATA.
+        Provision's older anisette server accepts GET /reprovision when
+        allow-remote-reprovisioning is on. POST /v3/resync is tried first for a
+        server that grew that route; a 404 falls through to GET /reprovision.
+        If neither answers, the owner has to restart the v3 server so it
+        re-provisions locally. This does not invent a successful resync.
+        """
+        if not md_data:
+            raise AnisetteError("Apple's resync request had no X-Apple-I-MD-DATA")
+        posted = self.http.request(
+            "POST",
+            self.url + "/v3/resync",
+            body=json.dumps({"X-Apple-I-MD-DATA": md_data}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            timeout=self.timeout,
+        )
+        if 200 <= posted.status < 300:
+            return
+        reprovisioned = self.http.request(
+            "GET", self.url + "/reprovision", timeout=self.timeout
+        )
+        if 200 <= reprovisioned.status < 300:
+            return
+        raise AnisetteError(
+            "Apple asked the anisette server to resynchronize (hsc 434), but it "
+            f"refused POST /v3/resync (HTTP {posted.status}) and GET /reprovision "
+            f"(HTTP {reprovisioned.status}). Dadoum's anisette-v3-server has no "
+            "remote resync route. Restart that server so it re-provisions, then "
+            "sign in again."
+        )
+
+    def _get_json(self, url: str) -> dict:
+        response = self.http.request("GET", url, timeout=self.timeout)
         if response.status != 200:
-            raise AnisetteError(f"anisette server returned HTTP {response.status}")
+            raise AnisetteError(f"anisette server returned HTTP {response.status} for {url}")
         try:
             payload = json.loads(response.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise AnisetteError("anisette server did not return JSON") from exc
-        return parse_anisette(payload, now=now)
+            raise AnisetteError(f"anisette server did not return JSON for {url}") from exc
+        if not isinstance(payload, dict):
+            raise AnisetteError(f"anisette response was not a JSON object for {url}")
+        return payload

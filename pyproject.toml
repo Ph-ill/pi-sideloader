@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest==9.0.2", "ruff>=0.6"]
 
 [project.scripts]
 sideload-pi = "sideload_pi.cli:main"
@@ -26,7 +26,8 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = [".", "src"]
+addopts = "--import-mode=prepend"
 testpaths = ["tests"]
 
 [tool.ruff]

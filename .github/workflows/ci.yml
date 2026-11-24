@@ -17,4 +17,6 @@ jobs:
       - name: Lint
         run: python -m ruff check src tests
       - name: Test
+        # Same command a developer runs. pythonpath includes the repo root so
+        # `from tests.support import` collects under pytest 9.
         run: python -m pytest
