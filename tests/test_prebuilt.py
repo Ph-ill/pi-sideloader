@@ -731,3 +731,95 @@ def test_rejected_tarball_leaves_an_existing_install_alone(tmp_path: Path):
     stamps = sorted((work / "stamps").glob("*.stamp"))
     assert stamps == [work / "stamps" / "zsign.stamp"]
     assert stamps[0].read_text(encoding="utf-8") == "seed\n"
+
+
+def _checker_module():
+    spec = importlib.util.spec_from_file_location("check_prebuilt_tar", CHECK)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_uncompressed_cap_counts_bytes_read_while_seeking():
+    checker = _checker_module()
+    cap = checker._UncompressedCap(io.BytesIO(b"x" * 200), 50)
+    assert cap.read(10) == b"x" * 10
+    with pytest.raises(ValueError, match="64 MiB"):
+        cap.seek(80)
+
+
+def test_checker_counts_a_non_regular_body_toward_the_size_cap(tmp_path: Path):
+    info = _member("usr/local/bin/blob", mode=0o644)
+    info.type = b"Z"
+    info.size = 64 * 1024 * 1024 + 1
+    archive = tmp_path / "odd.tar"
+    archive.write_bytes(info.tobuf() + b"\0" * 1024)
+    result = subprocess.run(
+        [sys.executable, str(CHECK), str(archive)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "64 MiB" in result.stderr
+    assert "not a regular file" not in result.stderr
+
+
+def test_checker_stops_on_the_first_rejected_member(tmp_path: Path):
+    archive = tmp_path / "two.tar"
+    first = _member("/etc/evil", mode=0o644)
+    payload = b"evil"
+    first.size = len(payload)
+    huge = _member("usr/local/bin/big", mode=0o644)
+    huge.size = 64 * 1024 * 1024 + 1
+    with tarfile.open(archive, "w") as handle:
+        handle.addfile(first, io.BytesIO(payload))
+    archive.write_bytes(archive.read_bytes() + huge.tobuf())
+    result = subprocess.run(
+        [sys.executable, str(CHECK), str(archive)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "absolute path" in result.stderr
+    assert "64 MiB" not in result.stderr
+
+
+def test_copy_rejects_dotdot_symlink_targets_and_passes_double_dash(tmp_path: Path):
+    src = tmp_path / "src" / "usr" / "local" / "lib"
+    src.mkdir(parents=True)
+    (src / "escape").symlink_to("sub/../../../../../../tmp/outside/secret")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    script = r"""
+set -euo pipefail
+source "$1"
+set +e
+_copy_prebuilt_tree "$2" "$3" usr/local/lib
+exit $?
+"""
+    result = subprocess.run(
+        ["bash", "-c", script, "copy", str(PHONE_STACK), str(src), str(dest)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert "refusing symlink" in result.stderr
+    assert not os.path.lexists(dest / "usr/local/lib/escape")
+
+    src2 = tmp_path / "src2" / "usr" / "local" / "lib"
+    src2.mkdir(parents=True)
+    (src2 / "libfoo.so").symlink_to("-alias")
+    dest2 = tmp_path / "dest2"
+    dest2.mkdir()
+    created = subprocess.run(
+        ["bash", "-c", script, "copy", str(PHONE_STACK), str(src2), str(dest2)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert created.returncode == 0, (created.stdout, created.stderr)
+    assert os.readlink(dest2 / "usr/local/lib/libfoo.so") == "-alias"

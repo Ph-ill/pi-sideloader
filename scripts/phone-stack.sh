@@ -203,6 +203,50 @@ _ensure_real_dest_dir() {
   done
 }
 
+# Same lexical rule as check-prebuilt-tar.py: a relative link must stay inside
+# the member's own allowlisted directory. ".." that climbs out is refused
+# before ln, and "--" keeps a target that looks like an option from being one.
+_prebuilt_symlink_is_confined() {
+  local member="$1" link="$2" prefix="" resolved part
+  local -a parts=() out=()
+  case "$member" in
+    usr/local/bin/*) prefix="usr/local/bin" ;;
+    usr/local/sbin/*) prefix="usr/local/sbin" ;;
+    usr/local/lib/*) prefix="usr/local/lib" ;;
+    usr/local/share/sideload-pi/*) prefix="usr/local/share/sideload-pi" ;;
+    *)
+      echo "refusing symlink outside an allowlisted directory: $member" >&2
+      return 1
+      ;;
+  esac
+  if [[ -z "$link" || "$link" == /* || "$link" == *$'\n'* ]]; then
+    echo "refusing symlink target ${link:-empty}" >&2
+    return 1
+  fi
+  local IFS=/
+  read -r -a parts <<< "${member%/*}/${link}"
+  for part in "${parts[@]}"; do
+    if [[ -z "$part" || "$part" == "." ]]; then
+      continue
+    fi
+    if [[ "$part" == ".." ]]; then
+      if [[ ${#out[@]} -eq 0 ]]; then
+        echo "refusing symlink target $link" >&2
+        return 1
+      fi
+      unset 'out[-1]'
+      continue
+    fi
+    out+=("$part")
+  done
+  resolved="$(IFS=/; echo "${out[*]}")"
+  case "$resolved" in
+    "$prefix"|"$prefix"/*) return 0 ;;
+  esac
+  echo "refusing symlink target $link" >&2
+  return 1
+}
+
 _copy_prebuilt_tree() {
   local src="$1" dest="$2" rel="$3"
   local path inner target parent link
@@ -230,8 +274,7 @@ _copy_prebuilt_tree() {
         return 1
       fi
       link="$(readlink "$path")" || return 1
-      if [[ -z "$link" || "$link" == /* ]]; then
-        echo "refusing symlink target $link" >&2
+      if ! _prebuilt_symlink_is_confined "${rel}/${inner}" "$link"; then
         return 1
       fi
       if [[ -L "$target" || -f "$target" ]]; then
@@ -241,7 +284,7 @@ _copy_prebuilt_tree() {
         echo "refusing to replace directory $target with a symlink" >&2
         return 1
       fi
-      ln -s "$link" "$target" || return 1
+      ln -s -- "$link" "$target" || return 1
     elif [[ -d "$path" ]]; then
       if ! _ensure_real_dest_dir "$dest" "${rel}/${inner}"; then
         return 1

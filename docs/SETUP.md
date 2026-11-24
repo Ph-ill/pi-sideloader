@@ -86,7 +86,7 @@ On an armv6l Pi, that command downloads a prebuilt tarball when `prebuilt/armv6.
 
 The script is safe to run again. It enables I2C and SPI in `/boot/firmware/config.txt` (or `/boot/config.txt` on older images). A source build compiles `libplist`, `libtatsu`, `libimobiledevice-glue`, `libusbmuxd`, `libimobiledevice`, `usbmuxd`, and `ideviceinstaller` from the commits in `scripts/phone-stack.sh` (the same file the prebuilt workflow uses), and builds [zsign](https://github.com/zhlynn/zsign) at the commit of pull request 391 (`make -C build/linux -j1`). `libimobiledevice` at that pin needs `libtatsu` >= 1.0.3, which apt does not ship. Bookworm's phone packages are not used: `libimobiledevice` 1.3.0 is too old for iOS 17, and `ideviceinstaller` 1.1.1 has no `list --xml`. A source build needs the `-dev` packages (`libcurl4-openssl-dev`, `libzip-dev`, and the rest). A prebuilt install only installs the runtime libraries (`libssl3`, `libstdc++6`, `libusb-1.0-0`, `libavahi-client3`, `libcurl4`, `libzip4`, `zlib1g`). It also installs `avahi-daemon` so a later Wi-Fi lookup can resolve the phone. It does not enable `systemd-time-wait-sync.service`: that oneshot does not exit until NTP, and `sudo sideload-pi enable` runs `systemctl enable --now`, which would hang on it. The daemon starts anyway. Each tick paints `waiting_for_clock` and does not refresh until the clock is at least 2026-01-01 and `timedatectl show -p NTPSynchronized --value` is `yes`. If the `timedatectl` binary is missing, only the date check applies. A non-zero exit, a timeout, or any other output counts as not synced. A temporary swap file is added only while those compiles run, and only if the Pi has no swap yet.
 
-It does **not** start `sideload-pi.service`. The panel test, `anisette_url`, and `sideload-pi login` come first. `sudo sideload-pi enable` is the step that starts the daemon.
+It does **not** start `sideload-pi.service`. The panel test and `sideload-pi login` come first. `anisette_url` is already set to the public Mac server. `sudo sideload-pi enable` is the step that starts the daemon.
 
 Python's cryptography and Pillow come from apt (`python3-cryptography`, `python3-pil`). Do not pip-install those on a Zero: cryptography wants a Rust compiler and the board will run out of memory. The only pip package is the pure-Python `srp` module, and only if apt did not already provide it.
 
@@ -211,27 +211,29 @@ Use the version that worked. `allow_partial` does not give V1 a partial refresh.
 
 V2, V3, and V4 partial-refresh the progress bar, and take a full refresh when the screen changes, after every `full_refresh_every` partials (default 8; Waveshare's note is about five), or every `full_refresh_minutes` (default 30). Set `allow_partial` to false if you want the slower full-only behavior on those panels too.
 
-The daemon is not running yet. Do not start it here. Next is the anisette URL, then login, then `sudo sideload-pi enable`.
+The daemon is not running yet. Do not start it here. Next is login, then `sudo sideload-pi enable`. The shipped config already sets `anisette_url`.
 
 `sudo sideload-pi display-test V2 --preview /tmp/v2.png` writes the card to a PNG and does not touch the panel. Useful over SSH if you want to look at the artwork, not useful for identifying the glass.
 
-## 7. Anisette, somewhere that is not this Pi
+## 7. Anisette
 
-Apple's login needs a short-lived device identity called anisette. The library that produces it ships for ARMv7, ARM64, and x86. A Zero is ARMv6. It cannot run that library, and this project will not pretend otherwise.
+Apple's login needs a short-lived device identity called anisette. The library that produces it ships for ARMv7, ARM64, and x86. A Zero is ARMv6, so it cannot run that library. The shipped `anisette_url` is `https://mac-ani.jkcoxson.com`, the public Mac-backed server. The client checks that server's HTTPS certificate in the normal way. Change `anisette_url` if you want a different server. Set it to an empty string to turn anisette off.
 
-Run [Dadoum's anisette-v3-server](https://github.com/Dadoum/anisette-v3-server) on a machine that can (a Linux box, a newer Pi, a small VPS). Give it a **persistent disk**. A fresh identity on every boot makes Apple ask for a verification code every time. Do not point this Pi at a public anisette server: you would share an identity with strangers, and Apple locks those.
+That server is shared. Other people using it present the same device identity to Apple. Apple can lock the Apple ID, and the server can be down or disappear. Use an Apple ID you can afford to dedicate to this Pi, not the account you use for purchases. The password still sits on the SD card.
 
-The client reads `GET /v3/client_info` for the `user_agent` and `client_info` pair, and `GET /` for the one-time password. Since 12 October 2026 Apple rejects a login (`-80045`) when those two headers do not match the program that produced the anisette data. Do not point this at a server that only speaks the old header set.
+Running your own server is optional. [Dadoum's anisette-v3-server](https://github.com/Dadoum/anisette-v3-server) on Linux is currently rejected by Apple (`ec=-29003` / `-80045`): its Android ADI data is presented as a Mac. See [Dadoum issue 61](https://github.com/Dadoum/anisette-v3-server/issues/61). A server that really speaks for a Mac can still be used by changing `anisette_url`. Give that server a persistent disk. A new identity on every boot makes Apple ask for a verification code every time.
+
+The client reads `GET /v3/client_info` for the `user_agent` and `client_info` pair and sends that pair unchanged. It does not expect a Linux or Android string. `GET /` is only the one-time password. Since 12 October 2026 Apple rejects a login (`-80045`) when those two headers do not match the program that produced the anisette data.
 
 If Apple answers `hsc` 434, the client asks the server to resynchronize and retries the login once with the same SRP public key, but only when that request succeeds. Dadoum's current `anisette-v3-server` has no resync route, and restarting it does not apply a resync. Login stops. Re-provision by wiping that server's provisioning data, or wait and try the login again. A server that answers `POST /v3/resync` or `GET /reprovision` with success still gets the one retry.
 
-Put the URL in the config. A Tailscale address is a good choice, so the Pi can reach it from a cafe without opening a port:
+The installed config already contains:
 
 ```json
-"anisette_url": "http://100.x.y.z:6969"
+"anisette_url": "https://mac-ani.jkcoxson.com"
 ```
 
-No trailing path is required. The client requests `{url}/v3/client_info` first (User-Agent and client info), then `GET {url}/` for the one-time password.
+No trailing path is required. The client requests `{url}/v3/client_info` first (User-Agent and client info), then `GET {url}/` for the one-time password. HTTPS uses the system trust store.
 
 ## 8. Apple ID
 
@@ -253,13 +255,13 @@ A free Personal Team, per Apple's account help, can have up to **10 App IDs** an
 
 App extensions and a watch app each need their own App ID, and they count toward both limits. By default they are stripped at sign time (`strip_extensions` and `strip_watch`). The status line says so when that happens. Turn the flags off only if you have the slots and you need the extension.
 
-The daemon starts only after the panel test, `anisette_url`, and this login:
+The daemon starts only after the panel test and this login. `anisette_url` is already the public Mac server unless you changed it:
 
 ```sh
 sudo sideload-pi enable
 ```
 
-That refuses to start while `anisette_url` is empty or no Apple ID is saved. The installed `display.version` is `V4`, and that explicit value is enough. `auto` is refused until `display-test` has recorded a driver you confirmed (or `--yes`). `enable` does not wait for NTP. The daemon starts, and a tick paints `waiting_for_clock` until the clock is synced.
+That refuses to start while `anisette_url` is empty (only if you cleared the default) or no Apple ID is saved. The installed `display.version` is `V4`, and that explicit value is enough. `auto` is refused until `display-test` has recorded a driver you confirmed (or `--yes`). `enable` does not wait for NTP. The daemon starts, and a tick paints `waiting_for_clock` until the clock is synced.
 
 ## 9. Trust and Developer Mode
 

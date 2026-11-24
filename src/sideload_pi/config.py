@@ -12,6 +12,10 @@ from sideload_pi.errors import ConfigError
 
 LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
 EPD_VERSIONS = frozenset({"V1", "V2", "V3", "V4", "auto"})
+# Public Mac-backed anisette. Linux/Android ADI is currently rejected by Apple.
+# Override anisette_url in the config to use a different server, or set it to
+# an empty string to refuse the public one.
+DEFAULT_ANISETTE_URL = "https://mac-ani.jkcoxson.com"
 
 
 def _as_int(value: object, name: str) -> int:
@@ -105,7 +109,7 @@ class Config:
     xcode_version: str = "11.2 (11B41)"
     client_id: str = "XABBG36SBA"
     protocol_version: str = "QH65B2"
-    anisette_url: str = ""
+    anisette_url: str = DEFAULT_ANISETTE_URL
     machine_name: str = "sideload-pi"
     two_fa_timeout_seconds: int = 600
     http_timeout_seconds: int = 60
@@ -339,7 +343,11 @@ def config_from_dict(data: dict) -> Config:
             if "protocol_version" in data
             else "QH65B2"
         ),
-        anisette_url=str(data.get("anisette_url", "") or ""),
+        anisette_url=(
+            str(data["anisette_url"] or "")
+            if "anisette_url" in data
+            else DEFAULT_ANISETTE_URL
+        ),
         machine_name=(
             _as_str(data["machine_name"], "machine_name")
             if "machine_name" in data

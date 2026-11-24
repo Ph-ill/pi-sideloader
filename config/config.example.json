@@ -2,7 +2,8 @@
   "notes": [
     "Do not put an Apple ID or password in this file. sideload-pi login stores them under the data directory, mode 0600.",
     "display.version is V1, V2, V3, V4, or auto. The sticker on the back of the screen decides it, not the Rev2.x print on the HAT. Confirm with: sudo sideload-pi display-test V1",
-    "Plug the iPhone into the Pi's USB port (not PWR): micro-USB OTG hub, then a USB-A to USB-C cable. Keep the UPS-Lite charger connected during a refresh."
+    "Plug the iPhone into the Pi's USB port (not PWR): micro-USB OTG hub, then a USB-A to USB-C cable. Keep the UPS-Lite charger connected during a refresh.",
+    "anisette_url is the public Mac server. Change it to use a different one, or set it to an empty string to turn anisette off."
   ],
   "refresh_margin_days": 1,
   "poll_seconds": 20,
@@ -17,7 +18,7 @@
   "sha256_only": true,
   "prefer_wifi": false,
   "enable_wifi_after_pair": true,
-  "anisette_url": "",
+  "anisette_url": "https://mac-ani.jkcoxson.com",
   "machine_name": "sideload-pi",
   "two_fa_timeout_seconds": 600,
   "root": "/var/lib/sideload-pi",

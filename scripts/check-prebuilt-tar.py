@@ -12,6 +12,9 @@ the link. Extraction does not follow symlinks, including symlink parents.
 from __future__ import annotations
 
 import argparse
+import bz2
+import gzip
+import lzma
 import os
 import stat
 import sys
@@ -278,49 +281,151 @@ def _extract_one(tf: tarfile.TarFile, info: tarfile.TarInfo, root: Path, root_re
         raise ValueError(f"refusing extracted symlink where a file was required: {path}")
 
 
+class _UncompressedCap:
+    """Count uncompressed bytes tarfile actually reads, including seeks.
+
+    A GNU longname or pax body is read inside ``TarFile.next`` before this
+    script sees the member. An unknown type is skipped by seeking across its
+    body. Both have to hit the same cap as a regular file. Re-reading a range
+    during extract does not count twice.
+    """
+
+    def __init__(self, fileobj, limit: int) -> None:
+        self._file = fileobj
+        self._limit = limit
+        self._pos = 0
+        self._high = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._pos
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = self._limit + 1
+        chunks: list[bytes] = []
+        remaining = size
+        while remaining > 0:
+            step = min(remaining, 1024 * 1024)
+            if self._pos >= self._high:
+                room = self._limit - self._high + 1
+                if room <= 0:
+                    raise ValueError("uncompressed size exceeds 64 MiB")
+                step = min(step, room)
+            data = self._file.read(step)
+            if not data:
+                break
+            chunks.append(data)
+            self._pos += len(data)
+            if self._pos > self._high:
+                self._high = self._pos
+            if self._high > self._limit:
+                raise ValueError("uncompressed size exceeds 64 MiB")
+            remaining -= len(data)
+        return b"".join(chunks)
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        if whence == os.SEEK_CUR:
+            offset += self._pos
+        elif whence == os.SEEK_END:
+            while True:
+                if not self.read(1024 * 1024):
+                    break
+            offset += self._pos
+        if offset < 0:
+            raise ValueError("negative seek")
+        if offset < self._pos:
+            self._file.seek(offset)
+            self._pos = offset
+            return self._pos
+        remaining = offset - self._pos
+        while remaining > 0:
+            data = self.read(min(1024 * 1024, remaining))
+            if not data:
+                break
+            remaining -= len(data)
+        return self._pos
+
+    def close(self) -> None:
+        self._file.close()
+
+
+def _decompressed(raw):
+    magic = raw.read(6)
+    raw.seek(0)
+    if magic.startswith(b"\x1f\x8b"):
+        return gzip.GzipFile(fileobj=raw, mode="rb")
+    if magic.startswith(b"BZh"):
+        return bz2.BZ2File(raw, mode="rb")
+    if magic.startswith(b"\xfd7zXZ\x00"):
+        return lzma.LZMAFile(raw, mode="rb")
+    return raw
+
+
+def _size_problem(total: int, size: int) -> bool:
+    return size < 0 or size > _MAX_UNCOMPRESSED or total + max(size, 0) > _MAX_UNCOMPRESSED
+
+
 def check_archive(archive: Path, extract: Path | None = None) -> list[str]:
     problems: list[str] = []
     members: list[tarfile.TarInfo] = []
     total = 0
     count = 0
-    with tarfile.open(archive, "r:*") as tf:
-        while True:
-            info = tf.next()
-            if info is None:
-                break
-            members.append(info)
-            if info.type in _META_TYPES:
-                continue
-            count += 1
-            if count > _MAX_MEMBERS:
-                problems.append(f"archive has more than {_MAX_MEMBERS} members")
-                break
-            if info.isreg():
-                over = (
-                    info.size < 0
-                    or info.size > _MAX_UNCOMPRESSED
-                    or total + info.size > _MAX_UNCOMPRESSED
-                )
-                if over:
+    raw = archive.open("rb")
+    stream = _decompressed(raw)
+    capped = _UncompressedCap(stream, _MAX_UNCOMPRESSED)
+    try:
+        try:
+            tf = tarfile.open(fileobj=capped, mode="r:")
+        except ValueError as exc:
+            if "64 MiB" in str(exc):
+                return [str(exc)]
+            raise
+        with tf:
+            while True:
+                try:
+                    info = tf.next()
+                except ValueError as exc:
+                    if "64 MiB" in str(exc):
+                        problems.append(str(exc))
+                        break
+                    raise
+                if info is None:
+                    break
+                members.append(info)
+                size = info.size or 0
+                if _size_problem(total, size):
                     problems.append(f"{info.name}: uncompressed size exceeds 64 MiB")
                     break
-                total += info.size
-            problem = member_problem(info)
-            if problem is None or problem is _SKIP:
-                continue
-            problems.append(f"{info.name}: {problem}")
-        if problems or extract is None:
-            return problems
-        root = Path(extract)
-        root.mkdir(parents=True, exist_ok=True)
-        root_real = Path(os.path.realpath(root))
-        if root.is_symlink():
-            raise ValueError("extract directory is a symlink")
-        for info in members:
-            if member_problem(info) is _SKIP:
-                continue
-            _extract_one(tf, info, root, root_real)
-    return []
+                total += max(size, 0)
+                if info.type in _META_TYPES:
+                    continue
+                count += 1
+                if count > _MAX_MEMBERS:
+                    problems.append(f"archive has more than {_MAX_MEMBERS} members")
+                    break
+                problem = member_problem(info)
+                if problem is None or problem is _SKIP:
+                    continue
+                # Do not scan further. The next header seek would read this body.
+                problems.append(f"{info.name}: {problem}")
+                break
+            if problems or extract is None:
+                return problems
+            root = Path(extract)
+            root.mkdir(parents=True, exist_ok=True)
+            root_real = Path(os.path.realpath(root))
+            if root.is_symlink():
+                raise ValueError("extract directory is a symlink")
+            for info in members:
+                if member_problem(info) is _SKIP:
+                    continue
+                _extract_one(tf, info, root, root_real)
+        return []
+    finally:
+        capped.close()
 
 
 def main(argv: list[str] | None = None) -> int:

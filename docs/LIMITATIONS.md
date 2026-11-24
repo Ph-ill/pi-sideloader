@@ -16,7 +16,7 @@ CI runs on a desktop Python. It does not have a Pi, a panel, a UPS, an iPhone, o
 
 ## By design
 
-- **Not self-contained for Apple login.** Anisette has to come from another machine. A public server is a bad idea and is not the default.
+- **Not self-contained for Apple login.** Anisette comes from another machine. The shipped default is the public Mac server `https://mac-ani.jkcoxson.com`. That shares an identity with everyone else using it, so Apple can lock the Apple ID, and the server can go away. Use a dedicated Apple ID. A self-hosted Linux server is currently rejected by Apple.
 - **The phone can draw current from the UPS, and software cannot stop it.** See [SETUP.md](SETUP.md). Use the UPS charger, a powered hub, or a data-only cable.
 - **V1 progress is a slow full refresh.** The upstream V1 driver has no partial display path. Flashing on every percent tick would be worse.
 - **Free Apple ID quotas** are enforced before the call when we already know them: 3 apps, 10 App IDs in 7 days, and a 4th device only after a free profile has been seen. Apple can still say no for a reason we did not predict. Extensions count if you turn stripping off.

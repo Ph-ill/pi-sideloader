@@ -12,7 +12,7 @@ This is for apps you built. It will not install App Store downloads. FairPlay-en
 - UPS-Lite v1.3 (CW2015 fuel gauge) under the Pi
 - Waveshare 2.13 inch e-Paper HAT, black/white. V1, V2, V3, and V4 are all supported. The red/black "B" panel and the 212×104 "D" panel are not
 - A micro-USB OTG hub (micro-USB plug to USB-A sockets) and a USB-A to USB-C cable for the iPhone
-- A free Apple ID you can dedicate to this, plus an [anisette](docs/SETUP.md) server you run somewhere else (a Pi Zero cannot build Apple's identity library)
+- A free Apple ID you can dedicate to this. Login uses the public Mac [anisette](docs/SETUP.md) server by default (a Pi Zero cannot build Apple's identity library)
 
 The step-by-step, including how the phone is cabled and how to tell which e-paper you have, is [docs/SETUP.md](docs/SETUP.md). Why these tools and not the others is [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). What has not been tried on real hardware is [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 

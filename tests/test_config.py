@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from sideload_pi.config import config_from_dict, load_config
+from sideload_pi.config import DEFAULT_ANISETTE_URL, config_from_dict, load_config
 from sideload_pi.errors import ConfigError
 from sideload_pi.redact import redact
 
@@ -17,7 +17,17 @@ def test_example_config_loads_and_ignores_notes():
     assert cfg.display.allow_partial is True
     assert cfg.battery.address == 0x62
     assert cfg.web.bind == "127.0.0.1"
-    assert cfg.anisette_url == ""
+    assert cfg.anisette_url == DEFAULT_ANISETTE_URL
+    assert data["anisette_url"] == DEFAULT_ANISETTE_URL
+    assert DEFAULT_ANISETTE_URL == "https://mac-ani.jkcoxson.com"
+
+
+def test_anisette_url_defaults_to_the_public_mac_server_and_can_be_cleared():
+    assert config_from_dict({}).anisette_url == DEFAULT_ANISETTE_URL
+    assert load_config(Path("/no/such/sideload-pi.json")).anisette_url == DEFAULT_ANISETTE_URL
+    overridden = config_from_dict({"anisette_url": "http://127.0.0.1:6969"})
+    assert overridden.anisette_url == "http://127.0.0.1:6969"
+    assert config_from_dict({"anisette_url": ""}).anisette_url == ""
 
 
 def test_remote_bind_and_shutdown_need_an_explicit_opt_in():

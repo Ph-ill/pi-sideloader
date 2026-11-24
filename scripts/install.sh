@@ -8,7 +8,7 @@
 #   commits in scripts/phone-stack.sh. zsign is pinned at or after zhlynn/zsign#391.
 # On an armv6l Pi, a recorded prebuilt tarball is installed instead of compiling.
 # Pass --build-from-source to skip that download and rebuild even if stamps match.
-# The daemon is not started here. Run display-test, set anisette_url, log in,
+# The daemon is not started here. Run display-test, log in,
 # then `sudo sideload-pi enable`.
 set -euo pipefail
 
@@ -262,7 +262,8 @@ echo "Answer y only when the card is sharp. That records the driver."
 echo "The installed default is display.version V4, which enable accepts."
 echo "auto stays blocked until that confirmation is recorded."
 echo
-echo "Next: set anisette_url, then sudo sideload-pi login, then sudo sideload-pi enable."
+echo "Next: sudo sideload-pi login, then sudo sideload-pi enable."
+echo "anisette_url is https://mac-ani.jkcoxson.com unless you change it."
 if [[ "$used_prebuilt" == 1 ]]; then
   echo "Phone tools came from the ${PREBUILT_TAG} prebuilt tarball (no compile)."
 else

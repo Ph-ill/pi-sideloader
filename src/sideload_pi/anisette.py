@@ -1,16 +1,16 @@
 """Fetch anisette headers from a remote anisette-v3-server.
 
 Apple's ADI library ships as armeabi-v7a, arm64, and x86. A Pi Zero (ARMv6)
-cannot run it, so this device calls a server the owner runs elsewhere.
-Keep that server's identity on disk. A new identity on every boot makes Apple
-ask for a verification code every time.
+cannot run it. The shipped default is the public Mac server
+https://mac-ani.jkcoxson.com. Another URL can be set in the config.
 
 Since 12 October 2026, GsService2 init fails with -80045 unless the User-Agent
 and X-MMe-Client-Info are the pair from the client that produced the anisette
-data (AltSign#61, AltStore#1828). Dadoum's anisette-v3-server publishes that
-pair at GET /v3/client_info. GET / still returns X-MMe-Client-Info from the
-v1 device description, which is a different string, so it is not used for the
-identity. The one-time password still comes from GET /.
+data (AltSign#61, AltStore#1828). The server publishes that pair at
+GET /v3/client_info. This client forwards those two strings unchanged, whether
+they describe a Mac or anything else. GET / still returns X-MMe-Client-Info,
+and that copy is not used for the identity. The one-time password still comes
+from GET /.
 """
 
 from __future__ import annotations
@@ -137,8 +137,9 @@ class AnisetteClient:
         if not self.url:
             raise AnisetteError(
                 "No anisette server is configured. A Pi Zero cannot generate anisette "
-                "data locally because Apple's ADI library has no ARMv6 build. Set "
-                "anisette_url to an anisette-v3-server you run, then try again."
+                "data locally because Apple's ADI library has no ARMv6 build. The "
+                "shipped default is https://mac-ani.jkcoxson.com. Set anisette_url "
+                "to use a different server."
             )
         identity = self._get_json(self.url + "/v3/client_info")
         client_info = str(identity.get("client_info") or "")

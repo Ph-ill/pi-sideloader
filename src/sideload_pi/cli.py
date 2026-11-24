@@ -327,7 +327,8 @@ def _display_test(config, driver: str | None, *, assume_yes: bool = False) -> in
         "The daemon and enable use that file when it exists. "
         "The shipped default display.version is V4, which enable accepts with no file. "
         "auto stays blocked until this confirmation. "
-        "Next: set anisette_url, log in, then sudo sideload-pi enable."
+        "Next: log in, then sudo sideload-pi enable. "
+        "anisette_url is already https://mac-ani.jkcoxson.com unless you changed it."
     )
     return 0
 
