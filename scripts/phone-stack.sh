@@ -118,19 +118,168 @@ prebuilt_sha256_matches() {
   fi
 }
 
+# True when rm/chown of dest/rel cannot follow a symlink. The last component
+# may be a symlink (a soname link we created). A symlink parent may not.
+_prebuilt_dest_is_confined() {
+  local dest="$1" rel="$2" acc="$dest" part
+  local -a parts=()
+  local i=0 last
+  if [[ -L "$acc" || ! -d "$acc" ]]; then
+    return 1
+  fi
+  local IFS=/
+  read -r -a parts <<< "$rel"
+  last=$((${#parts[@]} - 1))
+  for part in "${parts[@]}"; do
+    if [[ -z "$part" || "$part" == "." || "$part" == ".." ]]; then
+      return 1
+    fi
+    acc="${acc}/${part}"
+    if [[ -L "$acc" && "$i" -lt "$last" ]]; then
+      return 1
+    fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# Create a real directory for an install path. Symlinks at usr/local/{bin,
+# sbin,lib,share/sideload-pi} or below are removed and replaced. A symlink
+# higher than that (for example /usr itself) is refused, not followed.
+_ensure_real_dest_dir() {
+  local dest="$1" rel="$2" acc="$dest" part joined
+  local -a parts=() prefix=()
+  if [[ -L "$acc" ]]; then
+    echo "install destination $acc is a symlink" >&2
+    return 1
+  fi
+  if [[ ! -d "$acc" ]]; then
+    echo "install destination $acc is not a directory" >&2
+    return 1
+  fi
+  local IFS=/
+  read -r -a parts <<< "$rel"
+  for part in "${parts[@]}"; do
+    if [[ -z "$part" || "$part" == "." || "$part" == ".." ]]; then
+      echo "refusing destination path $rel" >&2
+      return 1
+    fi
+    acc="${acc}/${part}"
+    prefix+=("$part")
+    joined="$(IFS=/; echo "${prefix[*]}")"
+    if [[ -L "$acc" ]]; then
+      case "$joined" in
+        usr/local/bin|usr/local/bin/*|\
+        usr/local/sbin|usr/local/sbin/*|\
+        usr/local/lib|usr/local/lib/*|\
+        usr/local/share/sideload-pi|usr/local/share/sideload-pi/*)
+          rm -f "$acc" || return 1
+          ;;
+        *)
+          echo "refusing to follow symlink $acc" >&2
+          return 1
+          ;;
+      esac
+    fi
+    if [[ -e "$acc" && ! -d "$acc" ]]; then
+      echo "refusing $acc because it is not a directory" >&2
+      return 1
+    fi
+    if [[ ! -d "$acc" ]]; then
+      case "$joined" in
+        usr|usr/local|usr/local/share|\
+        usr/local/bin|usr/local/bin/*|\
+        usr/local/sbin|usr/local/sbin/*|\
+        usr/local/lib|usr/local/lib/*|\
+        usr/local/share/sideload-pi|usr/local/share/sideload-pi/*)
+          mkdir "$acc" || return 1
+          ;;
+        *)
+          echo "refusing to create $acc" >&2
+          return 1
+          ;;
+      esac
+    fi
+  done
+}
+
+_copy_prebuilt_tree() {
+  local src="$1" dest="$2" rel="$3"
+  local path inner target parent link
+  if [[ -L "$src" || ! -d "$src" ]]; then
+    echo "refusing to copy $rel because it is not a real directory" >&2
+    return 1
+  fi
+  if ! _ensure_real_dest_dir "$dest" "$rel"; then
+    return 1
+  fi
+  while IFS= read -r -d '' path; do
+    inner="${path#"$src"/}"
+    if [[ -z "$inner" || "$inner" == *"/.." || "$inner" == ".." || "$inner" == *"/.."/* ]]; then
+      echo "refusing to copy $path" >&2
+      return 1
+    fi
+    if [[ "$inner" == */* ]]; then
+      parent="${rel}/${inner%/*}"
+    else
+      parent="$rel"
+    fi
+    target="${dest}/${rel}/${inner}"
+    if [[ -L "$path" ]]; then
+      if ! _ensure_real_dest_dir "$dest" "$parent"; then
+        return 1
+      fi
+      link="$(readlink "$path")" || return 1
+      if [[ -z "$link" || "$link" == /* ]]; then
+        echo "refusing symlink target $link" >&2
+        return 1
+      fi
+      if [[ -L "$target" || -f "$target" ]]; then
+        rm -f "$target" || return 1
+      fi
+      if [[ -d "$target" ]]; then
+        echo "refusing to replace directory $target with a symlink" >&2
+        return 1
+      fi
+      ln -s "$link" "$target" || return 1
+    elif [[ -d "$path" ]]; then
+      if ! _ensure_real_dest_dir "$dest" "${rel}/${inner}"; then
+        return 1
+      fi
+    elif [[ -f "$path" ]]; then
+      if ! _ensure_real_dest_dir "$dest" "$parent"; then
+        return 1
+      fi
+      if [[ -L "$target" || -f "$target" ]]; then
+        rm -f "$target" || return 1
+      fi
+      if [[ -d "$target" ]]; then
+        echo "refusing to replace directory $target" >&2
+        return 1
+      fi
+      # --remove-destination unlinks a symlink instead of writing through it.
+      cp --remove-destination --preserve=mode "$path" "$target" || return 1
+    else
+      echo "refusing special file $path" >&2
+      return 1
+    fi
+  done < <(find -P "$src" -mindepth 1 -print0)
+}
+
 # Drop files this attempt copied, and the pin stamps. Called only after a
 # copy, including a verify or ldconfig failure. A rejected archive never
-# gets here, so a previous good install keeps its stamps.
+# gets here, so a previous good install keeps its stamps. rm does not follow
+# a symlink parent, so a failed copy cannot delete files outside dest.
 _prebuilt_cleanup_failed_install() {
   local tmp="$1" dest="$2" path rel target
-  if [[ -d "$tmp" ]]; then
+  if [[ -d "$tmp" && ! -L "$tmp" ]]; then
     while IFS= read -r -d '' path; do
       rel="${path#"$tmp"/}"
       target="${dest}/${rel}"
-      if [[ -L "$target" || -f "$target" ]]; then
+      if _prebuilt_dest_is_confined "$dest" "$rel" && [[ -L "$target" || -f "$target" ]]; then
         rm -f "$target"
       fi
-    done < <(find "$tmp" \( -type f -o -type l \) -print0)
+    done < <(find -P "$tmp" \( -type f -o -type l \) -print0)
   fi
   if [[ -d "$STAMP_DIR" ]]; then
     rm -f "$STAMP_DIR"/*.stamp
@@ -159,14 +308,10 @@ apply_prebuilt_archive() {
     return 1
   fi
   for rel in usr/local/bin usr/local/sbin usr/local/lib usr/local/share/sideload-pi; do
-    if [[ ! -d "$tmp/$rel" ]]; then
+    if [[ ! -d "$tmp/$rel" || -L "$tmp/$rel" ]]; then
       continue
     fi
-    if ! mkdir -p "$dest/$rel"; then
-      _prebuilt_cleanup_failed_install "$tmp" "$dest"
-      return 1
-    fi
-    if ! cp -a "$tmp/$rel/." "$dest/$rel/"; then
+    if ! _copy_prebuilt_tree "$tmp/$rel" "$dest" "$rel"; then
       echo "Could not copy $rel from the prebuilt tarball." >&2
       _prebuilt_cleanup_failed_install "$tmp" "$dest"
       return 1
@@ -177,6 +322,11 @@ apply_prebuilt_archive() {
     while IFS= read -r -d '' path; do
       rel="${path#"$tmp"/}"
       target="${dest}/${rel}"
+      if ! _prebuilt_dest_is_confined "$dest" "$rel"; then
+        echo "refusing to chown through a symlink: $target" >&2
+        _prebuilt_cleanup_failed_install "$tmp" "$dest"
+        return 1
+      fi
       if [[ -e "$target" || -L "$target" ]]; then
         if ! chown -h root:root "$target"; then
           echo "chown failed for $target" >&2
@@ -184,7 +334,7 @@ apply_prebuilt_archive() {
           return 1
         fi
       fi
-    done < <(find "$tmp" -mindepth 1 -print0)
+    done < <(find -P "$tmp" -mindepth 1 -print0)
   fi
   if [[ "$dest" == "/" ]]; then
     if ! echo /usr/local/lib > /etc/ld.so.conf.d/sideload-pi.conf; then

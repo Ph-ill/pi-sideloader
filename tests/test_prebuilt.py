@@ -72,7 +72,13 @@ def test_prebuilt_workflow_targets_raspbian_armv6_not_debian_armhf():
     assert "trusted=yes" not in script
     assert "ci/raspbian-archive-keyring.gpg" in script
     assert "A0DA38D0D76E8B5D638872819165938D90FDDD2E" in script
+    assert "D1852C8C1C632F26CF57F1D960B103E85373DC6C" in script
     assert "*.stamp" in script
+    armv6_job, release_job = text.split("\n  release:\n", 1)
+    assert "contents: read" in armv6_job
+    assert "contents: write" not in armv6_job
+    assert "contents: write" in release_job
+    assert "actions: read" in release_job
     assert "Tag_CPU_arch" in script
     assert "-cpu arm1176" in script
     assert 'tags: ["prebuilt-*"]' in text
@@ -373,7 +379,12 @@ def test_vendored_raspbian_key_fingerprint():
         text=True,
     )
     fingerprints = [line.split(":")[9] for line in out.splitlines() if line.startswith("fpr:")]
-    assert fingerprints[0] == "A0DA38D0D76E8B5D638872819165938D90FDDD2E"
+    pubs = [line for line in out.splitlines() if line.startswith("pub:")]
+    assert len(pubs) == 1
+    assert fingerprints == [
+        "A0DA38D0D76E8B5D638872819165938D90FDDD2E",
+        "D1852C8C1C632F26CF57F1D960B103E85373DC6C",
+    ]
 
 
 def test_build_from_source_exports_force_flags_and_fallback_does_not():
@@ -407,7 +418,9 @@ def test_checker_accepts_the_real_tarball_shape(tmp_path: Path):
     link = dest / "usr/local/lib/libfoo.so"
     assert link.is_symlink()
     assert os.readlink(link) == "libfoo.so.1"
-    assert (dest / "usr/local/lib/udev/rules.d/39-usbmuxd.rules").is_file()
+    rules = dest / "usr/local/lib/udev/rules.d/39-usbmuxd.rules"
+    assert rules.is_file()
+    assert rules.stat().st_mode & 0o022 == 0
 
 
 @pytest.mark.parametrize(
@@ -427,7 +440,27 @@ def test_checker_accepts_the_real_tarball_shape(tmp_path: Path):
         (
             "absolute-symlink",
             (_member("usr/local/bin/escape", kind="sym", link="/usr/local/../etc/passwd"), None),
-            "symlink target resolves outside usr/local",
+            "absolute symlink target",
+        ),
+        (
+            "absolute-symlink-inside",
+            (_member("usr/local/lib/libfoo.so", kind="sym", link="/usr/local/lib/libfoo.so.1"), None),
+            "absolute symlink target",
+        ),
+        (
+            "prefix-escape",
+            (_member("usr/local/bin/escape", kind="sym", link="../lib/libfoo.so"), None),
+            "symlink target resolves outside its allowlisted directory",
+        ),
+        (
+            "directory-symlink",
+            (_member("usr/local/lib/link", kind="sym", link="/usr/local"), None),
+            "absolute symlink target",
+        ),
+        (
+            "stamp",
+            (_member("usr/local/share/sideload-pi/zsign.stamp", mode=0o644), b"seed\n"),
+            "stamp file",
         ),
         (
             "setuid",
@@ -524,3 +557,177 @@ def test_try_prebuilt_writes_stamps_only_after_verify(tmp_path: Path):
     assert installer.is_file()
     assert installer.stat().st_mode & 0o111
     assert os.readlink(work / "root" / "usr" / "local" / "lib" / "libfoo.so") == "libfoo.so.1"
+
+
+def test_extract_refuses_a_symlinked_parent(tmp_path: Path):
+    canary = tmp_path / "canary"
+    canary.mkdir()
+    (canary / "marker").write_text("safe")
+    dest = tmp_path / "out"
+    (dest / "usr/local").mkdir(parents=True)
+    (dest / "usr/local/lib").symlink_to(canary)
+    archive = tmp_path / "ok.tar.gz"
+    _write_tar(archive, _tools(b"#!/bin/sh\necho '--xml'\n"))
+    result = subprocess.run(
+        [sys.executable, str(CHECK), "--extract", str(dest), str(archive)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, result.stderr
+    assert "symlink" in result.stderr.lower()
+    assert (canary / "marker").read_text(encoding="utf-8") == "safe"
+    assert not (canary / "libfoo.so.1").exists()
+    assert not (canary / "libfoo.so").exists()
+    assert not (canary / "udev").exists()
+
+
+def test_directory_symlink_to_usr_local_is_not_extracted(tmp_path: Path):
+    canary = tmp_path / "canary"
+    canary.mkdir()
+    (canary / "ideviceinstaller").write_text("safe")
+    archive = tmp_path / "escape.tar.gz"
+    _write_tar(
+        archive,
+        [
+            (_member("usr/local/lib/link", kind="sym", link="/usr/local"), None),
+            (_member("usr/local/lib/link/bin/ideviceinstaller", mode=0o755), b"pwned"),
+        ],
+    )
+    dest = tmp_path / "out"
+    (dest / "usr/local/bin").mkdir(parents=True)
+    kept = dest / "usr/local/bin/ideviceinstaller"
+    kept.write_text("keep")
+    result = subprocess.run(
+        [sys.executable, str(CHECK), "--extract", str(dest), str(archive)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "absolute symlink target" in result.stderr
+    assert kept.read_text(encoding="utf-8") == "keep"
+    assert (canary / "ideviceinstaller").read_text(encoding="utf-8") == "safe"
+    assert not (dest / "usr/local/lib/link").exists()
+
+
+def test_extract_clears_group_and_world_write(tmp_path: Path):
+    archive = tmp_path / "mode.tar.gz"
+    _write_tar(archive, [(_member("usr/local/bin/tool", mode=0o777), b"#!/bin/sh\n")])
+    dest = tmp_path / "out"
+    result = subprocess.run(
+        [sys.executable, str(CHECK), "--extract", str(dest), str(archive)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    mode = (dest / "usr/local/bin/tool").stat().st_mode
+    assert mode & 0o022 == 0
+    assert mode & 0o200
+
+
+def test_checker_rejects_an_uncompressed_size_over_64_mib(tmp_path: Path):
+    info = _member("usr/local/bin/big", mode=0o644)
+    info.size = 64 * 1024 * 1024 + 1
+    archive = tmp_path / "big.tar"
+    archive.write_bytes(info.tobuf() + b"\0" * 1024)
+    result = subprocess.run(
+        [sys.executable, str(CHECK), str(archive)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "64 MiB" in result.stderr
+
+
+def test_checker_rejects_more_than_512_members(tmp_path: Path):
+    members = [(_member(f"usr/local/bin/f{i}", mode=0o644), b"x") for i in range(513)]
+    archive = tmp_path / "many.tar.gz"
+    _write_tar(archive, members)
+    result = subprocess.run(
+        [sys.executable, str(CHECK), str(archive)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "512" in result.stderr
+
+
+def test_copy_replaces_destination_symlink_instead_of_following_it(tmp_path: Path):
+    work = tmp_path / "copy"
+    work.mkdir()
+    archive = work / "in.tar.gz"
+    _write_tar(archive, _tools(b"#!/bin/sh\necho '--xml'\n"))
+    script = r"""
+set -euo pipefail
+stack="$1"
+work="$2"
+archive="$3"
+export STAMP_DIR="$work/stamps"
+export PREFIX="$work/root/usr/local"
+export PREBUILT_DEST="$work/root"
+mkdir -p "$STAMP_DIR" "$work/root/usr/local/bin" "$work/canary"
+echo CANARY > "$work/canary/marker"
+echo CANARYBIN > "$work/canary/bin-target"
+ln -s "$work/canary" "$work/root/usr/local/lib"
+ln -s "$work/canary/bin-target" "$work/root/usr/local/bin/ideviceinstaller"
+# shellcheck disable=SC1090
+source "$stack"
+set +e
+if apply_prebuilt_archive "$archive"; then
+  status=0
+else
+  status=1
+fi
+exit "$status"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script, "copy", str(PHONE_STACK), str(work), str(archive)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert (work / "canary" / "marker").read_text(encoding="utf-8") == "CANARY\n"
+    assert (work / "canary" / "bin-target").read_text(encoding="utf-8") == "CANARYBIN\n"
+    installer = work / "root" / "usr" / "local" / "bin" / "ideviceinstaller"
+    assert installer.is_file()
+    assert not installer.is_symlink()
+    lib = work / "root" / "usr" / "local" / "lib"
+    assert lib.is_dir()
+    assert not lib.is_symlink()
+    assert (lib / "libfoo.so.1").is_file()
+    assert not (work / "canary" / "libfoo.so.1").exists()
+
+
+def test_rejected_tarball_leaves_an_existing_install_alone(tmp_path: Path):
+    work = tmp_path / "keep"
+    work.mkdir()
+    canary = tmp_path / "canary"
+    canary.mkdir()
+    (canary / "marker").write_text("safe")
+    root = work / "root"
+    (root / "usr/local/bin").mkdir(parents=True)
+    kept = root / "usr/local/bin/ideviceinstaller"
+    kept.write_text("keep-me")
+    (root / "usr/local/lib").symlink_to(canary)
+    archive = work / "in.tar.gz"
+    _write_tar(
+        archive,
+        [
+            (_member("usr/local/lib/link", kind="sym", link="/usr/local"), None),
+            (_member("usr/local/lib/link/bin/ideviceinstaller", mode=0o755), b"pwned"),
+        ],
+    )
+    result = _run_try(work, archive, hashlib.sha256(archive.read_bytes()).hexdigest())
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert kept.read_text(encoding="utf-8") == "keep-me"
+    assert (root / "usr/local/lib").is_symlink()
+    assert (canary / "marker").read_text(encoding="utf-8") == "safe"
+    assert not (canary / "ideviceinstaller").exists()
+    stamps = sorted((work / "stamps").glob("*.stamp"))
+    assert stamps == [work / "stamps" / "zsign.stamp"]
+    assert stamps[0].read_text(encoding="utf-8") == "seed\n"

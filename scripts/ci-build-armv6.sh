@@ -246,18 +246,24 @@ host_build() {
   fi
 
   local keyring="$REPO/ci/raspbian-archive-keyring.gpg"
-  local expected_fpr="A0DA38D0D76E8B5D638872819165938D90FDDD2E"
+  local primary_fpr="A0DA38D0D76E8B5D638872819165938D90FDDD2E"
+  local subkey_fpr="D1852C8C1C632F26CF57F1D960B103E85373DC6C"
   if [[ ! -f "$keyring" ]]; then
     echo "Vendored Raspbian keyring is missing: $keyring" >&2
     exit 1
   fi
-  local fpr
-  fpr="$(gpg --batch --show-keys --with-colons "$keyring" | awk -F: '$1=="fpr" {print $10; exit}')"
-  if [[ "$fpr" != "$expected_fpr" ]]; then
-    echo "Raspbian archive key fingerprint is '${fpr:-missing}', expected ${expected_fpr}." >&2
+  local key_report pub_count fprs
+  key_report="$(gpg --batch --show-keys --with-colons "$keyring")"
+  pub_count="$(printf '%s\n' "$key_report" | awk -F: '$1=="pub" {c++} END {print c+0}')"
+  fprs="$(printf '%s\n' "$key_report" | awk -F: '$1=="fpr" {print $10}')"
+  if [[ "$pub_count" != "1" || "$fprs" != "${primary_fpr}"$'\n'"${subkey_fpr}" ]]; then
+    echo "Raspbian archive keyring must contain exactly one public key." >&2
+    echo "Expected primary ${primary_fpr} and subkey ${subkey_fpr}." >&2
+    echo "pub count ${pub_count}; fingerprints:" >&2
+    printf '%s\n' "$fprs" >&2
     exit 1
   fi
-  echo "Raspbian archive key fingerprint ${fpr} matches."
+  echo "Raspbian archive key fingerprint ${primary_fpr} and subkey ${subkey_fpr} match."
 
   if [[ ! -x "$ROOTFS/bin/bash" ]]; then
     sudo rm -rf "$ROOTFS"

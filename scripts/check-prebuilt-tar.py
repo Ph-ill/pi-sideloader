@@ -3,16 +3,17 @@
 
 Members must be regular files, directories, symlinks, or hardlinks under
 ``usr/local/{bin,sbin,lib,share/sideload-pi}`` (parent directories of that
-tree are allowed too). Absolute names and any name containing ``..`` are
-refused. A symlink is refused when its target, resolved lexically from the
-link's directory and without touching the filesystem, leaves ``usr/local``.
-setuid, setgid, and device files are refused.
+tree are allowed too). Absolute names, any name containing ``..``, stamp
+files, setuid, setgid, and device files are refused. Symlink targets must be
+relative and must stay, lexically, inside the same allowlisted directory as
+the link. Extraction does not follow symlinks, including symlink parents.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import stat
 import sys
 import tarfile
 from pathlib import Path
@@ -43,6 +44,8 @@ _META_TYPES = frozenset(
     }
 )
 _SKIP = object()
+_MAX_MEMBERS = 512
+_MAX_UNCOMPRESSED = 64 * 1024 * 1024
 
 
 def _collapse(parts: list[str], *, absolute: bool) -> list[str] | None:
@@ -90,17 +93,38 @@ def _allowed(name: str) -> bool:
     return any(name.startswith(prefix) for prefix in _ALLOWED_PREFIXES)
 
 
-def _symlink_under_usr_local(member: str, linkname: str) -> bool:
-    if not linkname or "\0" in linkname or "\\" in linkname:
-        return False
+def _allowlisted_prefix(member: str) -> str | None:
+    for prefix in _ALLOWED_PREFIXES:
+        if member.startswith(prefix):
+            return prefix[:-1]
+    return None
+
+
+def _safe_mode(mode: int) -> int:
+    """Drop setuid/setgid and group/world write. Owner write is kept."""
+    return (mode & 0o777) & ~0o022
+
+
+def _symlink_problem(member: str, linkname: str) -> str | None:
+    if not linkname or "\0" in linkname or "\\" in linkname or "\n" in linkname:
+        return "symlink target is empty or has special characters"
+    # An absolute target such as /usr/local is still an escape: the next
+    # member can be written through that directory symlink onto the live system.
     if linkname.startswith("/"):
-        collapsed = _collapse(linkname.split("/"), absolute=True)
-    else:
-        parent = member.split("/")[:-1]
-        collapsed = _collapse([*parent, *linkname.split("/")], absolute=False)
-    if collapsed is None or len(collapsed) < 2:
-        return False
-    return collapsed[0] == "usr" and collapsed[1] == "local"
+        return "absolute symlink target"
+    prefix = _allowlisted_prefix(member)
+    if prefix is None:
+        return "symlink is outside an allowlisted directory"
+    parent = member.split("/")[:-1]
+    collapsed = _collapse([*parent, *linkname.split("/")], absolute=False)
+    if collapsed is None:
+        return "symlink target resolves outside usr/local"
+    resolved = "/".join(collapsed)
+    if resolved == prefix or resolved.startswith(prefix + "/"):
+        return None
+    if len(collapsed) >= 2 and collapsed[0] == "usr" and collapsed[1] == "local":
+        return "symlink target resolves outside its allowlisted directory"
+    return "symlink target resolves outside usr/local"
 
 
 def member_problem(info: tarfile.TarInfo) -> str | object | None:
@@ -112,6 +136,10 @@ def member_problem(info: tarfile.TarInfo) -> str | object | None:
         return error
     if name == "":
         return _SKIP
+    if name.endswith(".stamp"):
+        return "stamp file"
+    if info.isreg() and (info.size < 0 or info.size > _MAX_UNCOMPRESSED):
+        return "uncompressed size exceeds 64 MiB"
     if info.ischr() or info.isblk() or info.isfifo():
         return "device file"
     if not (info.isreg() or info.isdir() or info.issym() or info.islnk()):
@@ -120,8 +148,8 @@ def member_problem(info: tarfile.TarInfo) -> str | object | None:
         return "setuid or setgid bit is set"
     if not _allowed(name):
         return "outside usr/local/{bin,sbin,lib,share/sideload-pi}"
-    if info.issym() and not _symlink_under_usr_local(name, info.linkname or ""):
-        return "symlink target resolves outside usr/local"
+    if info.issym():
+        return _symlink_problem(name, info.linkname or "")
     if info.islnk():
         target, target_error = _normalize(info.linkname or "")
         if target_error or not target or not _allowed(target):
@@ -129,66 +157,169 @@ def member_problem(info: tarfile.TarInfo) -> str | object | None:
     return None
 
 
-def _destination(root: Path, name: str) -> Path:
-    path = root.joinpath(*name.split("/"))
-    if path != root and root not in path.parents:
-        raise ValueError(f"refusing to extract {name}")
-    return path
+def _must_stay(root_real: Path, path: Path) -> None:
+    real = Path(os.path.realpath(path))
+    if real != root_real and root_real not in real.parents:
+        raise ValueError(f"refusing to touch {path} outside the extract root")
 
 
-def _extract_one(tf: tarfile.TarFile, info: tarfile.TarInfo, root: Path) -> None:
+def _chmod_inside(root_real: Path, path: Path, mode: int) -> None:
+    if path.is_symlink():
+        raise ValueError(f"refusing to chmod symlink {path}")
+    _must_stay(root_real, path)
+    os.chmod(path, _safe_mode(mode))
+
+
+def _walk_real_dir(root: Path, root_real: Path, rel_dir: str) -> Path:
+    """Create real directories. A symlink component is an error, not a parent."""
+    current = root
+    if current.is_symlink() or not current.is_dir():
+        raise ValueError(f"extract root is not a real directory: {root}")
+    _must_stay(root_real, current)
+    if not rel_dir:
+        return current
+    for part in rel_dir.split("/"):
+        nxt = current / part
+        try:
+            st = os.lstat(nxt)
+        except FileNotFoundError:
+            os.mkdir(nxt, 0o755)
+            st = os.lstat(nxt)
+        if stat.S_ISLNK(st.st_mode):
+            raise ValueError(f"refusing to follow symlink parent {nxt}")
+        if not stat.S_ISDIR(st.st_mode):
+            raise ValueError(f"parent is not a real directory: {nxt}")
+        _chmod_inside(root_real, nxt, stat.S_IMODE(st.st_mode) or 0o755)
+        current = nxt
+    return current
+
+
+def _extract_one(tf: tarfile.TarFile, info: tarfile.TarInfo, root: Path, root_real: Path) -> None:
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("O_NOFOLLOW is required to extract a prebuilt tarball")
     name, error = _normalize(info.name)
     if error or not name:
         raise ValueError(error or "empty member")
-    path = _destination(root, name)
+    parent_rel, _, filename = name.rpartition("/")
+    parent = _walk_real_dir(root, root_real, parent_rel)
+    path = parent / filename
     if info.isdir():
-        path.mkdir(parents=True, exist_ok=True)
-        os.chmod(path, info.mode & 0o777)
+        _walk_real_dir(root, root_real, name)
+        _chmod_inside(root_real, path, info.mode or 0o755)
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_symlink() or path.exists():
-        path.unlink()
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        pass
+    else:
+        raise ValueError(f"refusing to replace existing path {path}")
     if info.issym():
         os.symlink(info.linkname, path)
+        try:
+            _must_stay(root_real, path)
+        except ValueError:
+            os.unlink(path)
+            raise
         return
     if info.islnk():
         target_name, target_error = _normalize(info.linkname or "")
         if target_error or not target_name:
             raise ValueError(target_error or "empty hardlink")
-        target = _destination(root, target_name)
-        if not target.is_file() or target.is_symlink():
-            raise ValueError(f"hardlink target is not an extracted file: {info.linkname}")
+        target_parent_rel, _, target_filename = target_name.rpartition("/")
+        target_parent = root
+        if target_parent_rel:
+            for part in target_parent_rel.split("/"):
+                target_parent = target_parent / part
+                try:
+                    parent_stat = os.lstat(target_parent)
+                except FileNotFoundError as exc:
+                    raise ValueError(f"hardlink target is missing: {info.linkname}") from exc
+                if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
+                    raise ValueError(f"refusing to follow symlink parent {target_parent}")
+                _must_stay(root_real, target_parent)
+        target = target_parent / target_filename
+        try:
+            target_stat = os.lstat(target)
+        except FileNotFoundError as exc:
+            raise ValueError(f"hardlink target is missing: {info.linkname}") from exc
+        if stat.S_ISLNK(target_stat.st_mode) or not stat.S_ISREG(target_stat.st_mode):
+            raise ValueError(f"hardlink target is not a regular file: {info.linkname}")
+        _must_stay(root_real, target)
         os.link(target, path)
+        try:
+            _must_stay(root_real, path)
+        except ValueError:
+            os.unlink(path)
+            raise
         return
     src = tf.extractfile(info)
     if src is None:
         raise ValueError(f"no content for {name}")
-    with path.open("wb") as out:
-        while True:
-            chunk = src.read(1024 * 1024)
+    mode = _safe_mode(info.mode or 0o644)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    try:
+        remaining = info.size
+        while remaining > 0:
+            chunk = src.read(min(1024 * 1024, remaining))
             if not chunk:
                 break
-            out.write(chunk)
-    os.chmod(path, info.mode & 0o777)
+            os.write(fd, chunk)
+            remaining -= len(chunk)
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+    try:
+        _must_stay(root_real, path)
+    except ValueError:
+        os.unlink(path)
+        raise
+    if path.is_symlink():
+        os.unlink(path)
+        raise ValueError(f"refusing extracted symlink where a file was required: {path}")
 
 
 def check_archive(archive: Path, extract: Path | None = None) -> list[str]:
     problems: list[str] = []
+    members: list[tarfile.TarInfo] = []
+    total = 0
+    count = 0
     with tarfile.open(archive, "r:*") as tf:
-        members = tf.getmembers()
-        for info in members:
+        while True:
+            info = tf.next()
+            if info is None:
+                break
+            members.append(info)
+            if info.type in _META_TYPES:
+                continue
+            count += 1
+            if count > _MAX_MEMBERS:
+                problems.append(f"archive has more than {_MAX_MEMBERS} members")
+                break
+            if info.isreg():
+                over = (
+                    info.size < 0
+                    or info.size > _MAX_UNCOMPRESSED
+                    or total + info.size > _MAX_UNCOMPRESSED
+                )
+                if over:
+                    problems.append(f"{info.name}: uncompressed size exceeds 64 MiB")
+                    break
+                total += info.size
             problem = member_problem(info)
             if problem is None or problem is _SKIP:
                 continue
             problems.append(f"{info.name}: {problem}")
         if problems or extract is None:
             return problems
-        root = extract.resolve()
+        root = Path(extract)
         root.mkdir(parents=True, exist_ok=True)
+        root_real = Path(os.path.realpath(root))
+        if root.is_symlink():
+            raise ValueError("extract directory is a symlink")
         for info in members:
             if member_problem(info) is _SKIP:
                 continue
-            _extract_one(tf, info, root)
+            _extract_one(tf, info, root, root_real)
     return []
 
 
