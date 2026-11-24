@@ -1,0 +1,2 @@
+# Apple's USB vendor ID. Wakes the daemon; it also polls, so a missed event still retries.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", TAG+="systemd", ENV{SYSTEMD_WANTS}="sideload-pi-wake.service"

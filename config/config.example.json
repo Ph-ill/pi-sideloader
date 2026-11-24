@@ -1,0 +1,51 @@
+{
+  "notes": [
+    "Do not put an Apple ID or password in this file. sideload-pi login stores them under the data directory, mode 0600.",
+    "display.version is V1, V2, V3, V4, or auto. The sticker on the back of the screen decides it, not the Rev2.x print on the HAT. Confirm with: sudo sideload-pi display-test V1",
+    "Plug the iPhone into the Pi's USB port (not PWR): micro-USB OTG hub, then a USB-A to USB-C cable. Keep the UPS-Lite charger connected during a refresh."
+  ],
+  "refresh_margin_days": 1,
+  "poll_seconds": 20,
+  "retry_base_seconds": 300,
+  "retry_cap_seconds": 21600,
+  "max_apps": 3,
+  "max_app_ids_per_window": 10,
+  "app_id_window_days": 7,
+  "profile_lifetime_days": 7,
+  "strip_extensions": true,
+  "strip_watch": true,
+  "sha256_only": true,
+  "prefer_wifi": false,
+  "enable_wifi_after_pair": true,
+  "anisette_url": "",
+  "machine_name": "sideload-pi",
+  "two_fa_timeout_seconds": 600,
+  "root": "/var/lib/sideload-pi",
+  "web": {
+    "enabled": true,
+    "bind": "127.0.0.1",
+    "port": 8741,
+    "max_upload_mb": 200,
+    "allow_remote": false
+  },
+  "display": {
+    "enabled": true,
+    "version": "V4",
+    "allow_partial": true,
+    "full_refresh_every": 8,
+    "full_refresh_minutes": 30,
+    "full_only_percent": 20,
+    "full_only_seconds": 15,
+    "rotate": 90
+  },
+  "battery": {
+    "enabled": true,
+    "i2c_bus": 1,
+    "address": "0x62",
+    "power_gpio_bcm": 4,
+    "power_detect_enabled": false,
+    "low_percent": 8,
+    "shutdown_on_low_battery": false,
+    "confirm_readings": 2
+  }
+}

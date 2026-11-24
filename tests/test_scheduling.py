@@ -1,0 +1,85 @@
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from sideload_pi.errors import LimitError
+from sideload_pi.scheduling import (
+    AppIdUse,
+    assert_can_add_app,
+    assert_can_register_app_id,
+    assert_extension_budget,
+    refresh_due,
+    retry_delay_seconds,
+    whole_days_remaining,
+)
+
+NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+
+
+def test_days_remaining_floors_partial_days():
+    assert whole_days_remaining(None, NOW) is None
+    assert whole_days_remaining(NOW - timedelta(hours=1), NOW) == 0
+    assert whole_days_remaining(NOW + timedelta(hours=23), NOW) == 0
+    assert whole_days_remaining(NOW + timedelta(hours=36), NOW) == 1
+
+
+def test_refresh_is_due_inside_the_margin_and_when_never_installed():
+    margin = timedelta(days=1)
+    assert refresh_due(None, NOW, margin) is True
+    assert refresh_due(NOW + timedelta(days=6), NOW, margin) is False
+    assert refresh_due(NOW + timedelta(hours=12), NOW, margin) is True
+
+
+def test_retry_backoff_triples_and_caps_at_six_hours():
+    assert retry_delay_seconds(1, 300, 21600) == 300
+    assert retry_delay_seconds(2, 300, 21600) == 900
+    assert retry_delay_seconds(3, 300, 21600) == 2700
+    assert retry_delay_seconds(4, 300, 21600) == 8100
+    assert retry_delay_seconds(5, 300, 21600) == 21600
+    with pytest.raises(ValueError):
+        retry_delay_seconds(0, 300, 21600)
+
+
+def test_reusing_a_bundle_does_not_spend_an_app_id():
+    uses = [AppIdUse(f"com.example.{i}", NOW - timedelta(days=1)) for i in range(10)]
+    assert_can_register_app_id(
+        uses,
+        "com.example.0",
+        NOW,
+        window=timedelta(days=7),
+        limit=10,
+        already_registered=True,
+    )
+    with pytest.raises(LimitError):
+        assert_can_register_app_id(
+            uses,
+            "com.example.new",
+            NOW,
+            window=timedelta(days=7),
+            limit=10,
+            already_registered=False,
+        )
+
+
+def test_fourth_app_is_refused_and_extensions_count_when_kept():
+    existing = ["a.b.c", "d.e.f", "g.h.i"]
+    assert_can_add_app(existing, "a.b.c", 3)
+    with pytest.raises(LimitError):
+        assert_can_add_app(existing, "j.k.l", 3)
+    assert_extension_budget(
+        ["a.b.c.widget"],
+        strip=True,
+        apps_after_add=1,
+        max_apps=3,
+        new_app_ids=1,
+        app_ids_remaining=0,
+    )
+    with pytest.raises(LimitError):
+        assert_extension_budget(
+            ["a.b.widget", "a.b.share", "a.b.intent"],
+            strip=False,
+            apps_after_add=1,
+            max_apps=3,
+            new_app_ids=4,
+            app_ids_remaining=10,
+        )

@@ -1,0 +1,5 @@
+pillow==13.0.0
+cryptography>=41
+srp==1.0.22
+pytest>=8
+ruff>=0.6
