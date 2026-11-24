@@ -1,0 +1,40 @@
+[project]
+name = "sideload-pi"
+version = "1.0.0"
+description = "Keep self-signed iOS apps installed from a Raspberry Pi Zero W."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Phill Scargill" }]
+dependencies = [
+    "cryptography>=41",
+    "pillow==13.0.0",
+    "srp==1.0.22",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.0.2", "ruff>=0.6"]
+
+[project.scripts]
+sideload-pi = "sideload_pi.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]
+addopts = "--import-mode=prepend"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]

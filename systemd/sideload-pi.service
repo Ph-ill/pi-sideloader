@@ -1,0 +1,16 @@
+[Unit]
+Description=sideload-pi IPA refresh
+After=network-online.target time-sync.target usbmuxd.service
+Wants=network-online.target time-sync.target
+
+[Service]
+Type=simple
+Environment=SIDELOAD_PI_CONFIG=/etc/sideload-pi/config.json
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/sideload-pi daemon
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

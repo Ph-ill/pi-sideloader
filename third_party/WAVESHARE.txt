@@ -1,0 +1,31 @@
+The e-paper init sequences and waveform LUT bytes in
+src/sideload_pi/display/luts.py and src/sideload_pi/display/epd.py are adapted
+from the Waveshare e-Paper Python demos:
+
+  https://github.com/waveshareteam/e-Paper
+  RaspberryPi_JetsonNano/python/lib/waveshare_epd/epd2in13.py
+  RaspberryPi_JetsonNano/python/lib/waveshare_epd/epd2in13_V2.py
+  RaspberryPi_JetsonNano/python/lib/waveshare_epd/epd2in13_V3.py
+  RaspberryPi_JetsonNano/python/lib/waveshare_epd/epd2in13_V4.py
+
+Those demos are Copyright (c) Waveshare team and are distributed under the
+MIT License (the permission grant reproduced below is the notice shipped in
+those files, including the upstream spelling).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documnetation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

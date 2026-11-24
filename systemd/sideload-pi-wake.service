@@ -1,0 +1,6 @@
+[Unit]
+Description=Wake sideload-pi when an iPhone is plugged in
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '/bin/systemctl kill -s SIGUSR1 sideload-pi.service || true'

@@ -1,0 +1,72 @@
+# ARMv6 phone tools for a Pi Zero W. Debian's armhf is ARMv7, so a branch
+# push debootstraps Raspbian Bookworm from archive.raspbian.org and compiles
+# with -march=armv6. That run uploads the tarball. A prebuilt-* tag, or a
+# workflow_dispatch with publish_tag, publishes that already-built artifact.
+# It does not compile again. The release job must not need the armv6 job:
+# on a tag push that job is skipped, and a skipped need would skip the
+# release. This workflow does not create a tag unless Phill dispatches
+# publish_tag himself.
+
+name: prebuilt
+
+# A new push to the same branch replaces a build that has not finished.
+# A tag publish does not cancel that build, and a build does not cancel a publish.
+concurrency:
+  group: prebuilt-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref_type == 'branch' }}
+
+on:
+  push:
+    branches: [cursor/sideload-pi, main]
+    tags: ["prebuilt-*"]
+  workflow_dispatch:
+    inputs:
+      publish_tag:
+        description: "Release name (prebuilt-YYYY-MM-DD). Leave empty to build this ref instead of publishing."
+        required: false
+        default: ""
+        type: string
+      source_sha:
+        description: "40-character commit whose successful artifact to publish. Required with publish_tag."
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  armv6:
+    if: >-
+      (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_tag == '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build in a Raspbian Bookworm armhf rootfs and check ARMv6
+        run: bash scripts/ci-build-armv6.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sideload-pi-prebuilt-armv6
+          path: |
+            dist/sideload-pi-prebuilt-armv6.tar.gz
+            dist/sideload-pi-prebuilt-armv6.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+  release:
+    if: >-
+      startsWith(github.ref, 'refs/tags/prebuilt-') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_tag != '')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Publish the already-built artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/publish-prebuilt.sh
