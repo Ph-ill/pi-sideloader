@@ -199,18 +199,27 @@ host_build() {
     echo "Run this on the host as a normal user; the script calls sudo." >&2
     exit 1
   fi
-  local stage=""
+  # Not local: the EXIT trap runs after this function has returned, and
+  # set -u would then trip on a local that has already gone away.
+  stage=""
   cleanup() {
     unmount_rootfs
-    if [[ -n "$stage" ]]; then
+    if [[ -n "${stage:-}" ]]; then
       sudo rm -rf "$stage"
     fi
   }
   trap cleanup EXIT
 
   sudo apt-get update
+  local qemu_pkg="qemu-user-static"
+  if apt-cache show qemu-user-binfmt >/dev/null 2>&1; then
+    # Ubuntu 26.04 made qemu-user-static a virtual package with two providers,
+    # so apt will not install that name. qemu-user-binfmt depends on qemu-user,
+    # which ships /usr/bin/qemu-arm.
+    qemu_pkg="qemu-user-binfmt"
+  fi
   sudo apt-get install -y \
-    debootstrap qemu-user-static binfmt-support binutils curl ca-certificates gnupg python3
+    debootstrap "$qemu_pkg" binfmt-support binutils curl ca-certificates gnupg python3
   if [[ ! -e /proc/sys/fs/binfmt_misc/status ]]; then
     sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
   fi
@@ -249,6 +258,10 @@ host_build() {
     echo "Finishing the debootstrap second stage under qemu."
     if [[ -x /usr/bin/qemu-arm-static ]]; then
       sudo cp /usr/bin/qemu-arm-static "$ROOTFS/usr/bin/qemu-arm-static"
+    elif [[ -x /usr/bin/qemu-arm ]]; then
+      # Dynamic qemu still runs ARM binaries via binfmt's F flag. The copy is
+      # only a hint for a second stage that looks the interpreter up inside.
+      sudo cp /usr/bin/qemu-arm "$ROOTFS/usr/bin/qemu-arm-static" || true
     fi
     sudo chroot "$ROOTFS" /debootstrap/debootstrap --second-stage
   fi
